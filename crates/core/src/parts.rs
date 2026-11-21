@@ -642,7 +642,7 @@ pub fn default_part_catalog() -> PartCatalog {
     });
     cat.insert(PartSpec {
         id: String::from("parachute_mk1"),
-        display_name: String::from("Mk-16 Chute"),
+        display_name: String::from("Mk-16 Nose Chute"),
         category: PartCategory::AeroAndThermal,
         dry_mass_kg: 45.0,
         shape: PartShape::Dome {
@@ -661,7 +661,7 @@ pub fn default_part_catalog() -> PartCatalog {
     });
     cat.insert(PartSpec {
         id: String::from("heat_shield"),
-        display_name: String::from("HS-125 Ablative Shield"),
+        display_name: String::from("HS-125 Heat Shield"),
         category: PartCategory::AeroAndThermal,
         dry_mass_kg: 75.0,
         shape: PartShape::RoundedRect {

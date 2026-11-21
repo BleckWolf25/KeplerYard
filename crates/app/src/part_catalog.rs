@@ -14,7 +14,6 @@
 //! @updated 21/11/2026
 
 // ---------- IMPORTS
-
 use crate::state::{ActiveBlueprint, LivePartCatalog, PartVisualStyle};
 use bevy::asset::io::Reader;
 use bevy::asset::{AssetLoader, LoadContext};
@@ -500,4 +499,60 @@ impl Plugin for PartCatalogPlugin {
     }
 }
 
-// ---------- EXPORTS
+#[cfg(test)]
+mod tests {
+    use super::PartSpecRon;
+    use kepler_core::parts::default_part_catalog;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn ron_parts_match_default_catalog() -> Result<(), Box<dyn std::error::Error>> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let parts_dir = manifest_dir.join("assets/parts");
+
+        let mut ron_specs = HashMap::new();
+        for entry in fs::read_dir(&parts_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("ron") {
+                let raw = fs::read_to_string(&path)?;
+                let spec: PartSpecRon = ron::from_str(&raw)?;
+                assert!(
+                    ron_specs.insert(spec.id.clone(), spec).is_none(),
+                    "duplicate part id in {}",
+                    path.display()
+                );
+            }
+        }
+
+        let rust_catalog = default_part_catalog();
+        assert_eq!(
+            ron_specs.len(),
+            rust_catalog.len(),
+            "part count mismatch between assets/parts/*.part.ron and default_part_catalog()"
+        );
+
+        for rust_part in rust_catalog.iter() {
+            let ron_part = ron_specs.get(&rust_part.id).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("missing .part.ron file for '{}'", rust_part.id),
+                )
+            })?;
+
+            assert_eq!(
+                ron_part.display_name, rust_part.display_name,
+                "name mismatch on {}",
+                rust_part.id
+            );
+            assert!(
+                (ron_part.dry_mass_kg - rust_part.dry_mass_kg).abs() < 1e-6,
+                "mass mismatch on {}",
+                rust_part.id
+            );
+        }
+
+        Ok(())
+    }
+}
