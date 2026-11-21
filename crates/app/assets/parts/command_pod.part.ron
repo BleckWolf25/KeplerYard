@@ -1,0 +1,17 @@
+PartSpecRon(
+    id: "command_pod",
+    display_name: "Mk-1 Command Pod",
+    category: Command,
+    dry_mass_kg: 600.0,
+    shape: Cone(bottom_width: 1.25, top_width: 0.55, height: 1.20),
+    kind: CommandPod(reaction_torque_nm: 4500.0, crewed: true),
+    stack_top: true,
+    stack_bottom: true,
+    radial_attach: false,
+    drag_coeff: 0.28,
+    max_impact_m_s: 16.0,
+    max_temp_k: 1850.0,
+    base_color: (0.20, 0.24, 0.30, 1.0),
+    accent_color: (0.16, 0.85, 1.00, 1.0),
+    emissive_strength: 1.8,
+)

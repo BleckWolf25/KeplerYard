@@ -1,0 +1,17 @@
+PartSpecRon(
+    id: "engine_orbital",
+    display_name: "LV-28V 'Vesper'",
+    category: Propulsion,
+    dry_mass_kg: 220.0,
+    shape: Nozzle(mount_width: 1.15, throat_width: 0.48, bell_width: 0.98, height: 1.05),
+    kind: Engine(max_thrust_n: 28000.0, isp_s: 340.0, gimbal_range_rad: 0.08),
+    stack_top: true,
+    stack_bottom: true,
+    radial_attach: false,
+    drag_coeff: 0.42,
+    max_impact_m_s: 10.0,
+    max_temp_k: 1550.0,
+    base_color: (0.28, 0.31, 0.37, 1.0),
+    accent_color: (0.30, 0.88, 1.00, 1.0),
+    emissive_strength: 2.0,
+)

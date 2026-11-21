@@ -1,0 +1,15 @@
+[package]
+name = "core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "kepler_core"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Zero external dependencies (pure std only).

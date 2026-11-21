@@ -1,0 +1,17 @@
+PartSpecRon(
+    id: "parachute_mk1",
+    display_name: "Mk-16 Nose Chute",
+    category: AeroAndThermal,
+    dry_mass_kg: 45.0,
+    shape: Dome(width: 0.60, height: 0.34),
+    kind: Parachute(deployed_drag_area_m2: 95.0),
+    stack_top: false,
+    stack_bottom: true,
+    radial_attach: false,
+    drag_coeff: 0.22,
+    max_impact_m_s: 16.0,
+    max_temp_k: 1650.0,
+    base_color: (0.78, 0.34, 0.22, 1.0),
+    accent_color: (1.00, 0.86, 0.52, 1.0),
+    emissive_strength: 1.5,
+)

@@ -1,0 +1,17 @@
+PartSpecRon(
+    id: "tank_large",
+    display_name: "FL-L3600 Core Tank",
+    category: FuelTanks,
+    dry_mass_kg: 400.0,
+    shape: RoundedRect(width: 1.65, height: 3.40, corner_radius: 0.10),
+    kind: Tank(fuel_capacity_kg: 3600.0),
+    stack_top: true,
+    stack_bottom: true,
+    radial_attach: false,
+    drag_coeff: 0.34,
+    max_impact_m_s: 12.0,
+    max_temp_k: 1250.0,
+    base_color: (0.84, 0.86, 0.90, 1.0),
+    accent_color: (0.98, 0.56, 0.14, 1.0),
+    emissive_strength: 1.4,
+)

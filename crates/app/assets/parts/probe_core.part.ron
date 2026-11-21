@@ -1,0 +1,17 @@
+PartSpecRon(
+    id: "probe_core",
+    display_name: "RC-001 Probe Core",
+    category: Command,
+    dry_mass_kg: 110.0,
+    shape: RoundedRect(width: 1.10, height: 0.42, corner_radius: 0.05),
+    kind: CommandPod(reaction_torque_nm: 1400.0, crewed: false),
+    stack_top: true,
+    stack_bottom: true,
+    radial_attach: false,
+    drag_coeff: 0.25,
+    max_impact_m_s: 12.0,
+    max_temp_k: 1500.0,
+    base_color: (0.24, 0.27, 0.34, 1.0),
+    accent_color: (0.98, 0.78, 0.24, 1.0),
+    emissive_strength: 2.1,
+)
