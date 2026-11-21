@@ -1,0 +1,19 @@
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+# Fail immediately if core and app diverge on core math/data crates
+deny = []
+skip = []
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

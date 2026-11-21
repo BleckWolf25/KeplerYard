@@ -6,5 +6,5 @@ command = ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=
 need_stdout = false
 
 [jobs.sim_test]
-command = ["cargo", "test", "-p", "sim_core", "--", "--nocapture"]
+command = ["cargo", "test", "-p", "core", "--", "--nocapture"]
 need_stdout = true
