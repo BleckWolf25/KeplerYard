@@ -10,3 +10,7 @@ workspace = true
 
 [dependencies]
 # Zero external dependencies (pure std only).
+
+[features]
+default = []
+dev = ["bevy/dynamic_linking"]

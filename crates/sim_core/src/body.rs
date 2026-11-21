@@ -13,14 +13,11 @@
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
-
 // ---------- IMPORTS
-
 use crate::math::{DVec2, GRAV_CONSTANT, TAU_F64, normalize_angle};
 use core::f64::consts::PI;
 
 // ---------- CONSTANTS
-
 /// Radius of primary planet Kepler Prime in meters (600 km scaled Earth-surface gravity world).
 pub const KEPLER_PRIME_RADIUS_M: f64 = 600_000.0;
 
@@ -301,7 +298,6 @@ pub fn compute_hohmann_transfer(
 }
 
 // ---------- TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;

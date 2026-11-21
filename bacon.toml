@@ -1,0 +1,10 @@
+# bacon.toml
+default_job = "clippy"
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=short"]
+need_stdout = false
+
+[jobs.sim_test]
+command = ["cargo", "test", "-p", "sim_core", "--", "--nocapture"]
+need_stdout = true

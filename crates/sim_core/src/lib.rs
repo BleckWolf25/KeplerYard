@@ -14,15 +14,7 @@
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
-
-// ---------- IMPORTS
-
-// ---------- CONSTANTS
-
-// ---------- TYPES
-
 // ---------- DECLARATIONS / IMPLEMENTATION
-
 pub mod body;
 pub mod math;
 pub mod parts;
@@ -31,7 +23,6 @@ pub mod sim;
 pub mod vessel;
 
 // ---------- EXPORTS
-
 pub use body::{
     AtmosphereParams, CelestialBody, KEPLER_PRIME_RADIUS_M, KEPLER_PRIME_SURFACE_G, OrbitElements,
     SELENE_ORBIT_RADIUS_M, SELENE_RADIUS_M, TransferPlanEstimate, compute_hohmann_transfer,

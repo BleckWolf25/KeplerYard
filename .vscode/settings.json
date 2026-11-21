@@ -1,0 +1,9 @@
+{
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.extraArgs": ["--all-targets"],
+  "rust-analyzer.cargo.features": ["dev"],
+  "files.associations": {
+    "*.wesl": "wgsl",
+    "*.part.ron": "ron"
+  }
+}
