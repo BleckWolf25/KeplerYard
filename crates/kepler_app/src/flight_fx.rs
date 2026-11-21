@@ -1,6 +1,6 @@
 //! @file flight_fx.rs
 //!
-//! @version 1.0.1
+//! @version 1.1.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -9,7 +9,7 @@
 //! @description
 //! Spawns a deterministic parallax starfield across all zoom scales, renders a procedural
 //! launchpad apron and gantry tower at Kepler Prime's north pole, and drives transient glowing
-//! shockwave rings and spark/dust particles for staging, touchdown, and impacts.
+//! shockwave rings and spark/dust particles using flat emissive material pass (style ID 99).
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -91,7 +91,11 @@ pub struct FxQueries<'w, 's> {
     pad_q: Query<
         'w,
         's,
-        (&'static LaunchpadStructure, &'static mut Transform, &'static mut Visibility),
+        (
+            &'static LaunchpadStructure,
+            &'static mut Transform,
+            &'static mut Visibility,
+        ),
         Without<ParallaxStar>,
     >,
     burst_q: BurstParticleQuery<'w, 's>,
@@ -131,7 +135,7 @@ pub fn spawn_environment_fx(
             base_color: col,
             accent_color: col,
             flags: Vec4::new(2.2, 0.0, 1.0, 0.0),
-            thermal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            thermal: Vec4::new(0.0, 1.0, 99.0, 0.0),
         });
 
         commands.spawn((
@@ -157,7 +161,7 @@ pub fn spawn_environment_fx(
             base_color: color,
             accent_color: Vec4::new(1.0, 0.65, 0.2, 1.0),
             flags: Vec4::new(1.4, 0.0, 1.0, 0.0),
-            thermal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            thermal: Vec4::new(0.0, 1.0, 99.0, 0.0),
         });
         commands.spawn((
             FlightFxMarker,
@@ -182,7 +186,7 @@ pub fn spawn_burst_ring_and_sparks(
             base_color: spec.color,
             accent_color: spec.color,
             flags: Vec4::new(2.8, 0.0, 1.0, 0.0),
-            thermal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            thermal: Vec4::new(0.0, 1.0, 99.0, 0.0),
         });
         commands.spawn((
             FlightFxMarker,
@@ -211,7 +215,7 @@ pub fn spawn_burst_ring_and_sparks(
                 base_color: spec.color,
                 accent_color: spec.color,
                 flags: Vec4::new(2.5, 0.0, 1.0, 0.0),
-                thermal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+                thermal: Vec4::new(0.0, 1.0, 99.0, 0.0),
             });
             commands.spawn((
                 FlightFxMarker,

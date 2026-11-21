@@ -1,16 +1,15 @@
 //! @file vessel.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Runtime vessel rigid body, SAS hold modes, RCS, SRBs, ablator, and radial staging
+//! @summary Runtime vessel rigid body, SAS hold modes, RCS, SRBs, ablator, and mirrored parts
 //!
 //! @description
-//! Converts blueprints into live rigid-body vessels, resolves fuel crossfeed across decouplers,
-//! simulates liquid engines, solid boosters, and RCS translation/attitude thrusters, tracks
-//! per-part reentry temperatures, ablator mass, and parachute states, enforces thermal and impact
-//! subtree damage, and handles stack/radial decoupler splits with exact momentum conservation.
+//! Converts blueprints into live rigid-body vessels, tracks part attach kind and mirrored visual
+//! flag, resolves fuel crossfeed, simulates liquid engines, SRBs, and RCS thrusters, tracks
+//! reentry temperatures, ablator mass, and parachutes, and handles decoupler splits.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -24,14 +23,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 // ---------- CONSTANTS
 
-/// Ambient spacecraft and atmospheric temperature in Kelvin.
 pub const AMBIENT_TEMP_K: f64 = 293.15;
 
 // ---------- TYPES
 
 pub type VesselId = u64;
 
-/// Errors returned when constructing or stepping vessels from invalid data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimError {
     EmptyBlueprint,
@@ -40,7 +37,6 @@ pub enum SimError {
     NoCoreRoot,
 }
 
-/// Guidance reference frame held by the SAS controller.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SasMode {
     #[default]
@@ -51,12 +47,12 @@ pub enum SasMode {
     Maneuver,
 }
 
-/// Live per-part runtime state inside a `Vessel`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartState {
     pub instance_id: u64,
     pub parent_id: Option<u64>,
     pub attach_kind: AttachKind,
+    pub mirrored: bool,
     pub spec: PartSpec,
     pub local_pos: DVec2,
     pub local_rot: f64,
@@ -74,22 +70,17 @@ pub struct PartState {
     pub heat_flux_w_m2: f64,
 }
 
-/// Player or autopilot control inputs applied during simulation substeps.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FlightControlInput {
     pub throttle: f64,
-    /// Steering torque command in `[-1.0, 1.0]` (`+1.0` rotates CCW / nose left).
     pub steer: f64,
     pub sas_enabled: bool,
     pub sas_mode: SasMode,
-    /// Target vessel angle (`rad`) supplied by the guidance frame when `sas_mode != Stability`.
     pub sas_target_angle: Option<f64>,
     pub rcs_enabled: bool,
-    /// Vessel-local RCS translation command `(right, forward)` in `[-1.0, 1.0]`.
     pub rcs_translate: DVec2,
 }
 
-/// Complete rigid-body and part-tree state of a spacecraft or debris stage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Vessel {
     pub id: VesselId,
@@ -110,7 +101,6 @@ pub struct Vessel {
     pub control: FlightControlInput,
 }
 
-/// Outcome returned when activating the next stage on a vessel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StagingOutcome {
     pub fired_stage: u32,
@@ -174,6 +164,7 @@ impl PartState {
             instance_id: placed.instance_id,
             parent_id: placed.parent_id,
             attach_kind: placed.attach_kind,
+            mirrored: placed.mirrored,
             spec,
             local_pos: placed.local_pos,
             local_rot: placed.local_rot,
@@ -199,7 +190,6 @@ impl PartState {
 }
 
 impl Vessel {
-    /// Builds a `Vessel` from a `VesselBlueprint`, computing exact CoM and moment of inertia.
     pub fn from_blueprint(
         id: VesselId,
         bp: &VesselBlueprint,
@@ -249,12 +239,10 @@ impl Vessel {
         Ok(vessel)
     }
 
-    /// Places the vessel upright on a planet surface centered at `body_pos` with radius `body_radius`.
     pub fn place_on_north_pole(&mut self, body_pos: DVec2, body_radius: f64) {
         self.place_on_north_pole_with_vel(body_pos, DVec2::ZERO, body_radius);
     }
 
-    /// Places the vessel upright on a body moving with `body_vel`.
     pub fn place_on_north_pole_with_vel(
         &mut self,
         body_pos: DVec2,
@@ -275,7 +263,6 @@ impl Vessel {
         self.landed = true;
     }
 
-    /// Recomputes `total_mass_kg`, `com_local`, and `moi_kg_m2`.
     pub fn recompute_mass_properties(&mut self, compensate_world_pos: bool) -> Result<(), SimError> {
         let old_com = self.com_local;
         let mut total_mass = 0.0;
@@ -313,7 +300,6 @@ impl Vessel {
         self.pos + (part.local_pos - self.com_local).rotate(self.angle)
     }
 
-    /// Returns `true` if this vessel contains an active command pod or probe core.
     pub fn is_controllable(&self) -> bool {
         !self.crashed
             && self
@@ -372,7 +358,6 @@ impl Vessel {
             .any(|p| matches!(p.spec.kind, PartKind::Rcs(_)))
     }
 
-    /// Current maximum available thrust (N) from active liquid engines and burning SRBs.
     pub fn active_max_thrust_n(&self) -> f64 {
         self.parts
             .iter()
@@ -385,7 +370,6 @@ impl Vessel {
             .sum()
     }
 
-    /// Arms all parachute parts on this vessel for low-altitude deployment.
     pub fn arm_all_parachutes(&mut self) -> usize {
         let mut armed = 0_usize;
         for p in &mut self.parts {
@@ -397,7 +381,6 @@ impl Vessel {
         armed
     }
 
-    /// Removes `root_id` and its descendants (used for impact or thermal part loss).
     pub fn destroy_part_subtree(&mut self, root_id: u64) -> usize {
         let root_hit = self.parts.iter().any(|p| {
             p.instance_id == root_id
@@ -429,8 +412,6 @@ impl Vessel {
         removed
     }
 
-    /// Checks thermal tolerances (`max_temp_k`) and removes overheated parts/subtrees, or marks
-    /// the vessel crashed if the command pod / root overheats.
     pub fn apply_thermal_damage(&mut self) -> usize {
         let overheated_ids: Vec<u64> = self
             .parts
@@ -506,8 +487,6 @@ impl Vessel {
         pod_torque + rcs_torque
     }
 
-    /// Activates engines/SRBs, arms parachutes, and triggers decouplers assigned to `self.current_stage`,
-    /// splitting detached subtrees into new tracked vessels while conserving linear momentum.
     pub fn activate_next_stage(&mut self, next_vessel_id: &mut u64) -> StagingOutcome {
         let stage = self.current_stage;
         let mut ignited_engines = 0_usize;
@@ -667,7 +646,6 @@ impl Vessel {
         }
     }
 
-    /// Evaluates effective per-engine throttle fractions and gimbal angles without mutating mass.
     pub fn prepare_step_throttles(&mut self, dt: f64) {
         let mut scratch_fuel: Vec<f64> = self.parts.iter().map(|p| p.fuel_kg).collect();
         let _ = self.apply_propellant_step(dt, &mut scratch_fuel);
@@ -686,7 +664,6 @@ impl Vessel {
         }
     }
 
-    /// Consumes propellant for duration `dt` across crossfeed-reachable tanks, SRBs, and RCS.
     pub fn consume_propellant(&mut self, dt: f64) {
         let mut live_fuel: Vec<f64> = self.parts.iter().map(|p| p.fuel_kg).collect();
         let changed = self.apply_propellant_step(dt, &mut live_fuel);
@@ -874,7 +851,6 @@ impl Vessel {
         fuel_changed
     }
 
-    /// Computes normalized steering command `[-1.0, 1.0]` combining manual input and SAS hold mode.
     pub fn effective_steer_command(&self) -> f64 {
         let steer_cmd = if self.is_debris || self.crashed {
             0.0

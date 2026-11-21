@@ -1,15 +1,15 @@
 //! @file save.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Bit-exact binary serialization and deserialization for SimWorld and VesselBlueprint
 //!
 //! @description
-//! Encodes and decodes complete `SimWorld` and `VesselBlueprint` state into a versioned little-endian
-//! binary stream preserving exact IEEE-754 `f64` bit patterns (`to_bits` / `from_bits`) so loaded
-//! saves replay identically down to the last bit with zero external serialization crates in `sim_core`.
+//! Encodes and decodes complete `SimWorld` and `VesselBlueprint` state (including `Booster` shape
+//! and `mirrored` flags) into a versioned little-endian binary stream preserving exact IEEE-754
+//! `f64` bit patterns with zero external serialization crates in `sim_core`.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -29,8 +29,8 @@ use core::fmt;
 
 // ---------- CONSTANTS
 
-const MAGIC_WORLD: &[u8; 8] = b"KYWORLD2";
-const MAGIC_BLUEPRINT: &[u8; 8] = b"KYCRAFT2";
+const MAGIC_WORLD: &[u8; 8] = b"KYWORLD3";
+const MAGIC_BLUEPRINT: &[u8; 8] = b"KYCRAFT3";
 
 // ---------- TYPES
 
@@ -64,7 +64,6 @@ impl fmt::Display for SaveError {
 
 impl std::error::Error for SaveError {}
 
-/// Encodes a `VesselBlueprint` into a deterministic binary byte vector.
 pub fn save_blueprint_bytes(bp: &VesselBlueprint) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     out.extend_from_slice(MAGIC_BLUEPRINT);
@@ -77,7 +76,6 @@ pub fn save_blueprint_bytes(bp: &VesselBlueprint) -> Vec<u8> {
     out
 }
 
-/// Decodes a `VesselBlueprint` from binary bytes produced by `save_blueprint_bytes`.
 pub fn load_blueprint_bytes(bytes: &[u8]) -> Result<VesselBlueprint, SaveError> {
     let mut r = Reader::new(bytes);
     if r.read_bytes(8)? != MAGIC_BLUEPRINT {
@@ -100,7 +98,6 @@ pub fn load_blueprint_bytes(bytes: &[u8]) -> Result<VesselBlueprint, SaveError> 
     })
 }
 
-/// Encodes a complete `SimWorld` into a bit-exact deterministic binary save.
 pub fn save_world_bytes(world: &SimWorld) -> Vec<u8> {
     let mut out = Vec::with_capacity(4096);
     out.extend_from_slice(MAGIC_WORLD);
@@ -121,7 +118,6 @@ pub fn save_world_bytes(world: &SimWorld) -> Vec<u8> {
     out
 }
 
-/// Decodes a bit-exact `SimWorld` from binary bytes produced by `save_world_bytes`.
 pub fn load_world_bytes(bytes: &[u8]) -> Result<SimWorld, SaveError> {
     let mut r = Reader::new(bytes);
     if r.read_bytes(8)? != MAGIC_WORLD {
@@ -375,26 +371,20 @@ fn write_placed_part(out: &mut Vec<u8>, p: &PlacedPart) {
     write_f64(out, p.local_rot);
     write_u32(out, p.stage);
     write_bool(out, p.crossfeed);
+    write_bool(out, p.mirrored);
 }
 
 fn read_placed_part(r: &mut Reader<'_>) -> Result<PlacedPart, SaveError> {
-    let instance_id = r.read_u64()?;
-    let spec_id = r.read_string()?;
-    let parent_id = r.read_opt_u64()?;
-    let attach_kind = read_attach_kind(r)?;
-    let local_pos = r.read_dvec2()?;
-    let local_rot = r.read_f64()?;
-    let stage = r.read_u32()?;
-    let crossfeed = r.read_bool()?;
     Ok(PlacedPart {
-        instance_id,
-        spec_id,
-        parent_id,
-        attach_kind,
-        local_pos,
-        local_rot,
-        stage,
-        crossfeed,
+        instance_id: r.read_u64()?,
+        spec_id: r.read_string()?,
+        parent_id: r.read_opt_u64()?,
+        attach_kind: read_attach_kind(r)?,
+        local_pos: r.read_dvec2()?,
+        local_rot: r.read_f64()?,
+        stage: r.read_u32()?,
+        crossfeed: r.read_bool()?,
+        mirrored: r.read_bool()?,
     })
 }
 
@@ -470,6 +460,16 @@ fn write_part_spec(out: &mut Vec<u8>, s: &PartSpec) {
             write_f64(out, width);
             write_f64(out, height);
             write_f64(out, foot_span);
+        }
+        PartShape::Booster {
+            width,
+            height,
+            nozzle_width,
+        } => {
+            write_u8(out, 6);
+            write_f64(out, width);
+            write_f64(out, height);
+            write_f64(out, nozzle_width);
         }
     }
 
@@ -581,6 +581,11 @@ fn read_part_spec(r: &mut Reader<'_>) -> Result<PartSpec, SaveError> {
             height: r.read_f64()?,
             foot_span: r.read_f64()?,
         },
+        6 => PartShape::Booster {
+            width: r.read_f64()?,
+            height: r.read_f64()?,
+            nozzle_width: r.read_f64()?,
+        },
         other => return Err(SaveError::InvalidTag("PartShape", other)),
     };
 
@@ -649,6 +654,7 @@ fn write_part_state(out: &mut Vec<u8>, p: &PartState) {
     write_u64(out, p.instance_id);
     write_opt_u64(out, p.parent_id);
     write_attach_kind(out, p.attach_kind);
+    write_bool(out, p.mirrored);
     write_part_spec(out, &p.spec);
     write_dvec2(out, p.local_pos);
     write_f64(out, p.local_rot);
@@ -671,6 +677,7 @@ fn read_part_state(r: &mut Reader<'_>) -> Result<PartState, SaveError> {
         instance_id: r.read_u64()?,
         parent_id: r.read_opt_u64()?,
         attach_kind: read_attach_kind(r)?,
+        mirrored: r.read_bool()?,
         spec: read_part_spec(r)?,
         local_pos: r.read_dvec2()?,
         local_rot: r.read_f64()?,

@@ -1,15 +1,14 @@
 //! @file part_catalog.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Hot-reloadable RON part asset discovery, loader, and live catalog synchronization
 //!
 //! @description
-//! Discovers all `*.part.ron` files in `assets/parts/` automatically (with built-in fallback list)
-//! and implements Bevy 0.20 `AssetLoader` for `PartSpecAsset` via `serde` and `ron`, syncing
-//! hot-reloaded part edits into `LivePartCatalog` immediately.
+//! Discovers all `*.part.ron` files in `assets/parts/` automatically (supporting `Booster` and
+//! `LandingStrut` silhouettes) and implements Bevy 0.20 `AssetLoader` for `PartSpecAsset`.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -114,6 +113,11 @@ pub enum PartShapeRon {
         width: f64,
         height: f64,
         foot_span: f64,
+    },
+    Booster {
+        width: f64,
+        height: f64,
+        nozzle_width: f64,
     },
 }
 
@@ -286,6 +290,15 @@ impl From<PartShapeRon> for PartShape {
                 width,
                 height,
                 foot_span,
+            },
+            PartShapeRon::Booster {
+                width,
+                height,
+                nozzle_width,
+            } => Self::Booster {
+                width,
+                height,
+                nozzle_width,
             },
         }
     }

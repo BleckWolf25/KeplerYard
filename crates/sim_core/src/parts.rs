@@ -1,16 +1,16 @@
 //! @file parts.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Categorized rocket part specifications, SRBs, landing legs, CoP, and pre-flight analysis
+//! @summary Categorized rocket part specifications, SRB Booster shape, mirroring, and CoP analysis
 //!
 //! @description
-//! Defines part categories (`Command`, `Propulsion`, `FuelTanks`, `AeroAndThermal`, `Structural`),
-//! vector shapes (`RoundedRect`, `Cone`, `Nozzle`, `Fin`, `Dome`, `LandingStrut`), thermal
-//! tolerances, SRBs, RCS, landing struts, nosecones, probe cores, tree-structured blueprints,
-//! symmetry/cloning helpers, Center of Pressure, and pre-flight engineering validation checks.
+//! Defines part categories, procedural shapes (`RoundedRect`, `Cone`, `Nozzle`, `Fin`, `Dome`,
+//! `LandingStrut`, `Booster`), thermal tolerances, SRBs, RCS, landing struts, nosecones,
+//! probe cores, tree-structured blueprints with rotation/mirroring/reparenting helpers, Center
+//! of Pressure, and pre-flight engineering validation checks.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -18,17 +18,16 @@
 // ---------- IMPORTS
 
 use crate::body::KEPLER_PRIME_SURFACE_G;
-use crate::math::{DVec2, G0};
+use crate::math::{DVec2, G0, normalize_angle};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 // ---------- CONSTANTS
 
-/// Torque threshold (N·m) above which the editor emits an asymmetric tip-over warning.
+/// Torque threshold (N*m) above which the editor emits an asymmetric tip-over warning.
 pub const TIP_OVER_TORQUE_WARN_NM: f64 = 120.0;
 
 // ---------- TYPES
 
-/// Functional category used to organize the editor part palette cleanly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PartCategory {
     Command,
@@ -38,7 +37,6 @@ pub enum PartCategory {
     Structural,
 }
 
-/// Procedural vector shape shared by physics footprints, attach nodes, icons, and Bevy meshes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PartShape {
     RoundedRect {
@@ -71,6 +69,11 @@ pub enum PartShape {
         width: f64,
         height: f64,
         foot_span: f64,
+    },
+    Booster {
+        width: f64,
+        height: f64,
+        nozzle_width: f64,
     },
 }
 
@@ -137,7 +140,6 @@ pub struct NoseConeSpec {
     pub drag_reduction: f64,
 }
 
-/// Functional category and parameters for a rocket part.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PartKind {
     CommandPod(PodSpec),
@@ -153,7 +155,6 @@ pub enum PartKind {
     NoseCone(NoseConeSpec),
 }
 
-/// Immutable data-driven definition for a part loaded from `.part.ron` or built-in defaults.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartSpec {
     pub id: String,
@@ -170,7 +171,6 @@ pub struct PartSpec {
     pub max_temp_k: f64,
 }
 
-/// Connection relationship between a child part and its parent in the craft tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachKind {
     Root,
@@ -180,7 +180,6 @@ pub enum AttachKind {
     RadialRight,
 }
 
-/// Placed part entry inside a `VesselBlueprint` before launch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlacedPart {
     pub instance_id: u64,
@@ -191,9 +190,9 @@ pub struct PlacedPart {
     pub local_rot: f64,
     pub stage: u32,
     pub crossfeed: bool,
+    pub mirrored: bool,
 }
 
-/// Editable vessel assembly graph produced by the VAB editor and launched into `SimWorld`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VesselBlueprint {
     pub name: String,
@@ -201,13 +200,11 @@ pub struct VesselBlueprint {
     pub next_instance_id: u64,
 }
 
-/// Catalog of available `PartSpec` definitions keyed by unique part ID.
 #[derive(Clone, Debug, Default)]
 pub struct PartCatalog {
     specs: BTreeMap<String, PartSpec>,
 }
 
-/// Tsiolkovsky performance metrics for a single stage in the editor UI.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StageSummary {
     pub stage: u32,
@@ -220,7 +217,6 @@ pub struct StageSummary {
     pub has_decoupler: bool,
 }
 
-/// Complete engineering telemetry readout and pre-flight checklist for a `VesselBlueprint`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlueprintAnalysis {
     pub wet_mass_kg: f64,
@@ -260,7 +256,6 @@ impl PartCategory {
 }
 
 impl PartShape {
-    /// Width and height bounding box in local meters (at `local_rot = 0`).
     pub fn bounding_size(&self) -> DVec2 {
         match *self {
             Self::RoundedRect { width, height, .. } => DVec2::new(width, height),
@@ -286,43 +281,41 @@ impl PartShape {
                 height,
                 foot_span,
             } => DVec2::new(width.max(foot_span), height),
+            Self::Booster {
+                width,
+                height,
+                nozzle_width,
+            } => DVec2::new(width.max(nozzle_width), height),
         }
     }
 
-    /// Top connection offset in local part coordinates.
     pub fn top_offset(&self) -> DVec2 {
         DVec2::new(0.0, 0.5 * self.bounding_size().y)
     }
 
-    /// Bottom connection offset in local part coordinates.
     pub fn bottom_offset(&self) -> DVec2 {
         DVec2::new(0.0, -0.5 * self.bounding_size().y)
     }
 
-    /// Radial left surface offset in local part coordinates.
     pub fn radial_left_offset(&self) -> DVec2 {
         DVec2::new(-0.5 * self.bounding_size().x, 0.0)
     }
 
-    /// Radial right surface offset in local part coordinates.
     pub fn radial_right_offset(&self) -> DVec2 {
         DVec2::new(0.5 * self.bounding_size().x, 0.0)
     }
 
-    /// Approximate rectangular moment of inertia factor `(w^2 + h^2) / 12` per kg.
     pub fn unit_moi(&self) -> f64 {
         let size = self.bounding_size();
         (size.x * size.x + size.y * size.y) / 12.0
     }
 
-    /// Effective half-extents for collision and editor selection.
     pub fn contact_half_extent(&self) -> DVec2 {
         self.bounding_size() * 0.5
     }
 }
 
 impl PartSpec {
-    /// Wet mass of a single part at full propellant load.
     pub fn full_mass_kg(&self) -> f64 {
         match self.kind {
             PartKind::Tank(t) => self.dry_mass_kg + t.fuel_capacity_kg,
@@ -387,6 +380,7 @@ impl VesselBlueprint {
             local_rot: 0.0,
             stage,
             crossfeed: false,
+            mirrored: false,
         });
         id
     }
@@ -411,6 +405,7 @@ impl VesselBlueprint {
             local_rot,
             stage,
             crossfeed: false,
+            mirrored: attach_kind == AttachKind::RadialRight,
         });
         id
     }
@@ -421,7 +416,35 @@ impl VesselBlueprint {
         }
     }
 
-    /// Removes a non-root part and all of its descendant children.
+    pub fn rotate_part(&mut self, part_id: u64, delta_rad: f64) {
+        if let Some(p) = self.parts.iter_mut().find(|p| p.instance_id == part_id) {
+            p.local_rot = normalize_angle(p.local_rot + delta_rad);
+        }
+    }
+
+    pub fn toggle_part_mirrored(&mut self, part_id: u64) {
+        if let Some(p) = self.parts.iter_mut().find(|p| p.instance_id == part_id) {
+            p.mirrored = !p.mirrored;
+        }
+    }
+
+    /// Detaches direct children of `part_id` up to `part_id`'s parent so `part_id` can move alone.
+    pub fn reparent_children_to_parent(&mut self, part_id: u64) {
+        let grand_parent = self
+            .parts
+            .iter()
+            .find(|p| p.instance_id == part_id)
+            .and_then(|p| p.parent_id);
+        let Some(gp) = grand_parent else {
+            return;
+        };
+        for p in &mut self.parts {
+            if p.parent_id == Some(part_id) {
+                p.parent_id = Some(gp);
+            }
+        }
+    }
+
     pub fn remove_subtree(&mut self, target_id: u64) -> bool {
         let Some(target) = self.parts.iter().find(|p| p.instance_id == target_id) else {
             return false;
@@ -444,7 +467,6 @@ impl VesselBlueprint {
         true
     }
 
-    /// Clones a non-root part subtree translated by `offset`, returning the cloned root ID.
     pub fn duplicate_subtree(&mut self, target_id: u64, offset: DVec2) -> Option<u64> {
         let root = self
             .parts
@@ -494,12 +516,12 @@ impl VesselBlueprint {
                 local_rot: orig.local_rot,
                 stage: orig.stage,
                 crossfeed: orig.crossfeed,
+                mirrored: orig.mirrored,
             });
         }
         Some(new_root_id)
     }
 
-    /// Finds a symmetric opposite-side sibling for `part_id` if radially attached in a pair.
     pub fn find_mirror_twin(&self, part_id: u64) -> Option<u64> {
         let target = self.parts.iter().find(|p| p.instance_id == part_id)?;
         let opposite = match target.attach_kind {
@@ -519,7 +541,6 @@ impl VesselBlueprint {
             .map(|p| p.instance_id)
     }
 
-    /// Checks whether `candidate_id` is `target_id` or inside `target_id`'s subtree.
     pub fn is_in_subtree(&self, target_id: u64, candidate_id: u64) -> bool {
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
@@ -538,7 +559,6 @@ impl VesselBlueprint {
         false
     }
 
-    /// Translates `target_id` and all its descendants by `delta` meters.
     pub fn translate_subtree(&mut self, target_id: u64, delta: DVec2) {
         let mut queue = VecDeque::new();
         let mut ids = HashSet::new();
@@ -559,7 +579,6 @@ impl VesselBlueprint {
     }
 }
 
-/// Built-in default part catalog mirroring `assets/parts/*.part.ron`.
 pub fn default_part_catalog() -> PartCatalog {
     let mut cat = PartCatalog::new();
     cat.insert(PartSpec {
@@ -798,10 +817,10 @@ pub fn default_part_catalog() -> PartCatalog {
         display_name: String::from("SRB-90 'Hammer' Booster"),
         category: PartCategory::Propulsion,
         dry_mass_kg: 420.0,
-        shape: PartShape::RoundedRect {
+        shape: PartShape::Booster {
             width: 0.95,
             height: 3.60,
-            corner_radius: 0.10,
+            nozzle_width: 0.86,
         },
         kind: PartKind::SolidBooster(SrbSpec {
             max_thrust_n: 135_000.0,
@@ -920,7 +939,6 @@ pub fn default_part_catalog() -> PartCatalog {
     cat
 }
 
-/// Builds the default two-stage orbital rocket (~4,650 m/s total delta-v).
 pub fn starter_two_stage_blueprint(catalog: &PartCatalog) -> VesselBlueprint {
     let mut bp = VesselBlueprint::new("Kepler-I Orbital");
     let pod_id = bp.add_root("command_pod", 1);
@@ -1020,7 +1038,6 @@ pub fn starter_two_stage_blueprint(catalog: &PartCatalog) -> VesselBlueprint {
     bp
 }
 
-/// Builds a heavy 3-stage Selene-capable rocket with nose parachute and ablative heat shield.
 pub fn lunar_capable_blueprint(catalog: &PartCatalog) -> VesselBlueprint {
     let mut bp = VesselBlueprint::new("Selene Explorer III");
     let pod_id = bp.add_root("command_pod", 3);
@@ -1140,7 +1157,6 @@ pub fn lunar_capable_blueprint(catalog: &PartCatalog) -> VesselBlueprint {
     bp
 }
 
-/// Computes center of mass, center of pressure, MoI, tip-over torque, Δv, and pre-flight warnings.
 pub fn analyze_blueprint(bp: &VesselBlueprint, catalog: &PartCatalog) -> BlueprintAnalysis {
     let mut wet_mass = 0.0;
     let mut dry_mass = 0.0;
@@ -1267,10 +1283,10 @@ fn build_preflight_warnings(
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     if tip_over_warning {
-        warnings.push(format!("Tip-over thrust torque ({net_torque:+.0} N·m)"));
+        warnings.push(format!("Tip-over thrust torque ({net_torque:+.0} N*m)"));
     }
     if aero_unstable {
-        warnings.push(String::from("CoP is above CoM — add tail fins"));
+        warnings.push(String::from("CoP is above CoM - add tail fins"));
     }
 
     if let Some(s0) = stages.first() {
@@ -1322,7 +1338,6 @@ fn build_preflight_warnings(
     warnings
 }
 
-/// Computes stage-by-stage Tsiolkovsky delta-v in firing order (`stage 0, 1, 2...`) for UI readouts.
 fn compute_stage_tsiolkovsky(bp: &VesselBlueprint, catalog: &PartCatalog) -> Vec<StageSummary> {
     if bp.parts.is_empty() {
         return Vec::new();
@@ -1490,7 +1505,6 @@ fn compute_stage_tsiolkovsky(bp: &VesselBlueprint, catalog: &PartCatalog) -> Vec
     summaries
 }
 
-/// Traverses the alive part graph across crossfeed-enabled edges to locate fuel tanks for an engine.
 fn reachable_fuel_tanks_blueprint(
     parts: &[PlacedPart],
     alive: &HashSet<u64>,

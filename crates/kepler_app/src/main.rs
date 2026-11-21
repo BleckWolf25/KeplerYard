@@ -1,6 +1,6 @@
 //! @file main.rs
 //!
-//! @version 1.2.0
+//! @version 1.2.1
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -9,8 +9,7 @@
 //! @description
 //! Configures Bevy 0.20.1 with 2D rendering, HDR bloom, hot-reloading asset file watching,
 //! custom WESL shader materials, automatic RON part discovery, procedural part & UI icons,
-//! categorized drag-and-drop VAB editor with staging/CoP/craft library, and full cislunar
-//! N-body flight with navball, SAS modes, FX, and save/load.
+//! categorized freeform VAB editor, and full cislunar N-body flight.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -46,7 +45,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: String::from("Kepler Yard — Orbital Foundry"),
+                        title: String::from("Kepler Yard - Orbital Foundry"),
                         resolution: WindowResolution::new(1520, 940),
                         ..default()
                     }),

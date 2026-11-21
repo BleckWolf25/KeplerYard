@@ -1,16 +1,16 @@
 //! @file flight.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Flight simulation coordinator: cislunar N-body, gimbal plumes, FX, HUD, and save/load
+//! @summary Flight simulation coordinator with SFS part shaders, throat glow, FX, HUD, and save/load
 //!
 //! @description
-//! Orchestrates live flight over `SimWorld`: spawns vessel/plume/chute/reentry visuals with
-//! mirrored right-side fins/struts, drives physical vs orbital warp limits, SAS hold modes,
-//! RCS translation, multi-vessel `[`/`]` switching, maneuver nodes, throttled trajectory prediction,
-//! `[F5]`/`[F9]` bit-exact quickload rebuilds, parallax starfield/launchpad FX, and Navball HUD.
+//! Orchestrates live flight over `SimWorld`: spawns mirrored part meshes with archetype style IDs,
+//! updates live engine nozzle incandescence and pressure-responsive plumes, drives physical vs
+//! orbital warp limits, SAS hold modes, RCS translation, maneuver nodes, `[F5]`/`[F9]` quickloads,
+//! parallax starfield/launchpad FX, and the 2D Navball HUD.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -35,12 +35,12 @@ use crate::shaders::{AtmosphereMaterial, PartMaterial, PlumeMaterial, ReentryMat
 use crate::state::{
     ActiveBlueprint, AudioCue, AudioCueQueue, CameraFocusState, CameraFocusTarget, FlightClock,
     FloatingOrigin, GameMode, LivePartCatalog, PHYSICAL_WARP_MAX_INDEX, TIME_WARP_LEVELS,
-    world_to_render_vec2,
+    part_style_id, world_to_render_vec2,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use sim_core::{
-    ApsisKind, AttachKind, DVec2, ManeuverPlan, PartKind, PredictionOptions, SasMode, SimWorld,
+    ApsisKind, DVec2, ManeuverPlan, PartKind, PredictionOptions, SasMode, SimWorld,
     TrajectoryPrediction, TransferPlanEstimate, Vessel, VesselId, body::dominant_body,
     compute_hohmann_transfer, sim::SimStepEvent,
 };
@@ -330,7 +330,7 @@ fn exit_flight(mut commands: Commands, query: Query<Entity, With<FlightEntity>>)
     for e in &query {
         commands.entity(e).despawn();
     }
-        commands.remove_resource::<FlightSimState>();
+    commands.remove_resource::<FlightSimState>();
     commands.remove_resource::<FxMeshCache>();
 }
 
@@ -401,8 +401,9 @@ fn spawn_vessel_visuals(
             .get(&part.spec.id)
             .copied()
             .unwrap_or_default();
-        let mirrored = part.attach_kind == AttachKind::RadialRight;
-        let mesh = assets.meshes.add(build_part_mesh(&part.spec.shape, mirrored));
+        let mesh = assets
+            .meshes
+            .add(build_part_mesh(&part.spec.shape, part.mirrored));
         let sz = part.spec.shape.bounding_size();
         max_w = max_w.max((part.local_pos.x.abs() * 2.0 + sz.x) as f32);
         max_h = max_h.max((part.local_pos.y.abs() * 2.0 + sz.y) as f32);
@@ -426,7 +427,7 @@ fn spawn_vessel_visuals(
             base_color: Vec4::from_array(style.base_color),
             accent_color: Vec4::from_array(style.accent_color),
             flags: Vec4::new(style.emissive_strength, 0.0, fuel_frac, 0.0),
-            thermal: Vec4::new(0.0, abl_frac, 0.0, 0.0),
+            thermal: Vec4::new(0.0, abl_frac, part_style_id(&part.spec), 0.0),
         });
         let world_p = vessel.part_world_pos(part);
         let pos_2d = world_to_render_vec2(world_p, origin);
@@ -482,7 +483,7 @@ fn spawn_vessel_visuals(
                 base_color: Vec4::new(0.96, 0.42, 0.18, 0.94),
                 accent_color: Vec4::new(1.00, 0.94, 0.78, 1.0),
                 flags: Vec4::new(1.5, 0.0, 1.0, 0.0),
-                thermal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+                thermal: Vec4::new(0.0, 1.0, 13.0, 0.0),
             });
             commands.spawn((
                 FlightEntity,
@@ -510,7 +511,9 @@ fn spawn_vessel_visuals(
     let v_pos = world_to_render_vec2(vessel.pos, origin);
     commands.spawn((
         FlightEntity,
-        FlightReentryVisual { vessel_id: vessel.id },
+        FlightReentryVisual {
+            vessel_id: vessel.id,
+        },
         Mesh2d(reentry_mesh),
         MeshMaterial2d(reentry_mat),
         Transform::from_xyz(v_pos.x, v_pos.y, 2.0),
@@ -530,6 +533,7 @@ fn step_flight_controls_and_physics(
     let clock = &mut ctx.clock;
     let origin = &mut ctx.origin;
     let focus = &mut ctx.focus;
+
     if flight.request_revert_pad {
         flight.request_revert_pad = false;
         if let Ok(new_world) =
@@ -598,7 +602,6 @@ fn step_flight_controls_and_physics(
         };
     }
 
-    // Multi-vessel switching ([ / ])
     if (keys.just_pressed(KeyCode::BracketRight) || keys.just_pressed(KeyCode::BracketLeft))
         && let Some(id) = flight.world.cycle_active_vessel()
         && let Some((ctrl, name)) = flight
@@ -643,7 +646,6 @@ fn step_flight_controls_and_physics(
         }
     }
 
-    // Selene Transfer Planner controls
     if keys.just_pressed(KeyCode::KeyM)
         && let Some(v) = flight.world.active_vessel()
         && let Some(est) = compute_hohmann_transfer(&flight.world.bodies, v.pos, v.vel, 1)
@@ -684,7 +686,6 @@ fn step_flight_controls_and_physics(
         }
     }
 
-    // Bit-exact QuickSave / QuickLoad
     if keys.just_pressed(KeyCode::F5) {
         match save_quicksave(&flight.world, flight.maneuver) {
             Ok(path) => {
@@ -783,7 +784,6 @@ fn step_flight_controls_and_physics(
         active.control.rcs_translate = rcs_trans;
     }
 
-    // Auto-drop warp approaching planned burn
     if flight.maneuver.enabled && flight.maneuver.lead_time_s <= 15.0 && clock.warp_index > 0 {
         clock.warp_index = 0;
         flight.status_banner = String::from("Auto-dropped warp for maneuver node!");
@@ -798,47 +798,47 @@ fn step_flight_controls_and_physics(
                 SimStepEvent::PartDestroyed { world_pos, thermal } => {
                     ctx.audio_cues.cues.push(AudioCue::PartDestroyed { thermal });
                     spawn_burst_ring_and_sparks(
-                &mut commands,
-                &ctx.fx_cache,
-                &mut part_mats,
-                BurstSpec {
-                    world_pos,
-                    base_vel: DVec2::ZERO,
-                    color: Vec4::new(1.0, 0.42, 0.14, 0.95),
-                    count: 12,
-                    seed: (flight.world.time_s * 100.0) as u64,
-                },
-            );
+                        &mut commands,
+                        &ctx.fx_cache,
+                        &mut part_mats,
+                        BurstSpec {
+                            world_pos,
+                            base_vel: DVec2::ZERO,
+                            color: Vec4::new(1.0, 0.42, 0.14, 0.95),
+                            count: 12,
+                            seed: (flight.world.time_s * 100.0) as u64,
+                        },
+                    );
                 }
                 SimStepEvent::VesselCrashed { world_pos } => {
                     ctx.audio_cues.cues.push(AudioCue::VesselCrashed);
                     spawn_burst_ring_and_sparks(
-                &mut commands,
-                &ctx.fx_cache,
-                &mut part_mats,
-                BurstSpec {
-                    world_pos,
-                    base_vel: DVec2::ZERO,
-                    color: Vec4::new(1.0, 0.25, 0.12, 1.0),
-                    count: 24,
-                    seed: (flight.world.time_s * 1000.0) as u64,
-                },
-            );
+                        &mut commands,
+                        &ctx.fx_cache,
+                        &mut part_mats,
+                        BurstSpec {
+                            world_pos,
+                            base_vel: DVec2::ZERO,
+                            color: Vec4::new(1.0, 0.25, 0.12, 1.0),
+                            count: 24,
+                            seed: (flight.world.time_s * 1000.0) as u64,
+                        },
+                    );
                 }
                 SimStepEvent::Touchdown { world_pos, speed_m_s } => {
                     ctx.audio_cues.cues.push(AudioCue::Touchdown { speed_m_s });
                     spawn_burst_ring_and_sparks(
-                &mut commands,
-                &ctx.fx_cache,
-                &mut part_mats,
-                BurstSpec {
-                    world_pos,
-                    base_vel: DVec2::ZERO,
-                    color: Vec4::new(0.80, 0.78, 0.72, 0.65),
-                    count: 10,
-                    seed: (flight.world.time_s * 50.0) as u64,
-                },
-            );
+                        &mut commands,
+                        &ctx.fx_cache,
+                        &mut part_mats,
+                        BurstSpec {
+                            world_pos,
+                            base_vel: DVec2::ZERO,
+                            color: Vec4::new(0.80, 0.78, 0.72, 0.65),
+                            count: 10,
+                            seed: (flight.world.time_s * 50.0) as u64,
+                        },
+                    );
                 }
                 SimStepEvent::ChuteDeployed { .. } => {
                     ctx.audio_cues.cues.push(AudioCue::ChuteDeploy);
@@ -850,7 +850,6 @@ fn step_flight_controls_and_physics(
         }
     }
 
-    // Track peak mission stats
     if let Some((v_id, peak_t)) = flight
         .world
         .active_vessel()
@@ -922,6 +921,7 @@ fn sync_flight_visuals_and_hud(
     hud_ctx: (HudSyncQueries, BadgeQuery),
 ) {
     let (hud_queries, badge_q) = hud_ctx;
+
     match state.focus.target {
         CameraFocusTarget::ActiveVessel => {
             if let Some(active) = state.flight.world.active_vessel() {
@@ -1035,6 +1035,7 @@ fn sync_flight_visuals_and_hud(
             if vis.ablator_cap_kg > 0.0 {
                 mat.thermal.y = (snap.ablator_kg / vis.ablator_cap_kg as f32).clamp(0.0, 1.0);
             }
+            mat.thermal.w = snap.throttle;
             mat.flags.w = elapsed;
         }
     }
@@ -1162,8 +1163,16 @@ fn draw_orbital_and_transfer_gizmos(
         let mp = world_to_render_vec2(mpos, origin);
         let r = (10.0 * ortho_scale).max(0.5);
         gizmos.circle_2d(mp, r, Color::srgb(1.0, 0.45, 0.92));
-        gizmos.line_2d(mp - Vec2::X * r * 1.4, mp + Vec2::X * r * 1.4, Color::srgb(1.0, 0.45, 0.92));
-        gizmos.line_2d(mp - Vec2::Y * r * 1.4, mp + Vec2::Y * r * 1.4, Color::srgb(1.0, 0.45, 0.92));
+        gizmos.line_2d(
+            mp - Vec2::X * r * 1.4,
+            mp + Vec2::X * r * 1.4,
+            Color::srgb(1.0, 0.45, 0.92),
+        );
+        gizmos.line_2d(
+            mp - Vec2::Y * r * 1.4,
+            mp + Vec2::Y * r * 1.4,
+            Color::srgb(1.0, 0.45, 0.92),
+        );
     }
 
     if let (Some(ghost_m), Some(moon)) = (
@@ -1178,7 +1187,6 @@ fn draw_orbital_and_transfer_gizmos(
         );
     }
 
-    // Active vessel locator reticle when zoomed out to map scale
     if ortho_scale > 8.0
         && let Some(v) = flight.world.active_vessel()
     {

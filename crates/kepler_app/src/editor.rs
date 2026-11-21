@@ -1,17 +1,16 @@
 //! @file editor.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Full VAB assembly editor with symmetry, stage stack, CoP, undo/redo, and craft library
+//! @summary Freeform SFS-style VAB assembly editor with symmetry, rotation, icons, and craft library
 //!
 //! @description
-//! Implements the expanded VAB construction editor: scrollable categorized part thumbnails,
-//! cached mesh handles during live drag-and-drop onto stack or radial pylon nodes, mirrored
-//! right-side fins/struts, 2x symmetry mode (`[X]`), subtree cloning (`Alt+Drag` or button),
-//! CoM & CoP reticles, pre-flight engineering warnings, visual stage stack with crossfeed toggles,
-//! undo/redo history (`Ctrl+Z`/`Ctrl+Y`), craft renaming, and a multi-slot saved craft library.
+//! Implements freeform drag-and-drop rocket construction: parts snap flush onto attach nodes when
+//! near them or drop anywhere in the bay on a 0.10 m grid (holding Shift bypasses snap), Ctrl+Drag
+//! moves a single part without its children, dragging the root moves the whole rocket, Q/E rotates,
+//! F mirrors, arrows nudge, and every category/action button renders crisp FromWorld icons.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -21,9 +20,11 @@
 use crate::camera::MainCamera;
 use crate::part_icons::{PartIconRegistry, UiIconKind};
 use crate::procedural_mesh::build_part_mesh;
-use crate::save_io::{delete_saved_craft, list_saved_crafts, load_craft_from_path, save_craft_blueprint};
+use crate::save_io::{
+    delete_saved_craft, list_saved_crafts, load_craft_from_path, save_craft_blueprint,
+};
 use crate::shaders::PartMaterial;
-use crate::state::{ActiveBlueprint, GameMode, LivePartCatalog, uniform_border};
+use crate::state::{ActiveBlueprint, GameMode, LivePartCatalog, part_style_id, uniform_border};
 use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
@@ -95,6 +96,9 @@ enum AttachAction {
     AttachTop,
     AttachRadialPair,
     ToggleSymmetry,
+    RotateLeft,
+    RotateRight,
+    FlipMirror,
     DuplicateSelected,
     ToggleCrossfeed,
     Undo,
@@ -116,6 +120,7 @@ struct DragGhostPose {
     rot: f64,
     mirrored: bool,
     snapped: bool,
+    style_id: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -142,10 +147,12 @@ enum DragPhase {
         start_cursor: Vec2,
         start_world: DVec2,
         alt_clone: bool,
+        ctrl_single: bool,
     },
     DraggingExisting {
         part_id: u64,
         last_world: DVec2,
+        is_root: bool,
     },
 }
 
@@ -174,7 +181,6 @@ struct EditorContext<'w, 's> {
     windows: Query<'w, 's, &'static Window>,
     cam_q: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<MainCamera>>,
     catalog: Res<'w, LivePartCatalog>,
-    icons: Res<'w, PartIconRegistry>,
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
 }
@@ -208,7 +214,8 @@ type RenameTextQuery<'w, 's> = Query<
 #[derive(SystemParam)]
 struct EditorReadoutQueries<'w, 's> {
     readout_q: Query<'w, 's, &'static mut Text, With<EditorReadoutText>>,
-    sym_text_q: Query<'w, 's, &'static mut Text, (With<SymmetryStatusText>, Without<EditorReadoutText>)>,
+    sym_text_q:
+        Query<'w, 's, &'static mut Text, (With<SymmetryStatusText>, Without<EditorReadoutText>)>,
     rename_text_q: RenameTextQuery<'w, 's>,
     mat_q: Query<'w, 's, (&'static EditorPartNode, &'static MeshMaterial2d<PartMaterial>)>,
     palette_q: Query<'w, 's, (&'static PaletteButton, &'static mut BorderColor)>,
@@ -251,7 +258,9 @@ impl Default for EditorState {
             snap_preview: None,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
-            status_note: String::from("Drag parts onto rocket. [X] 2x Symmetry | [Alt+Drag] Clone."),
+            status_note: String::from(
+                "Drop parts anywhere (Shift bypasses snap). [Q/E] Rot [F] Flip",
+            ),
         }
     }
 }
@@ -371,16 +380,16 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
 
             parent.spawn((
                 SymmetryStatusText,
-                Text::new("Symmetry: 2x [X]  |  Wheel scroll catalog"),
+                Text::new("Symmetry: 2x [X]  |  Scroll catalog"),
                 TextFont::from_font_size(11.0),
                 TextColor(Color::srgb(0.35, 0.95, 0.72)),
             ));
 
             parent.spawn((
                 Text::new(
-                    "Drag part onto rocket or pylon to snap.\n\
-                     Alt+Drag: Clone | Ctrl+Z/Y: Undo/Redo\n\
-                     R-Drag: Pan | Wheel: Zoom | Del: Remove",
+                    "Drop parts anywhere on grid (Shift: free)\n\
+                     Ctrl+Drag: Single part | Alt+Drag: Clone\n\
+                     Q/E: Rotate | F: Flip | Arrows: Nudge",
                 ),
                 TextFont::from_font_size(10.5),
                 TextColor(Color::srgba(0.68, 0.82, 0.92, 0.85)),
@@ -409,12 +418,11 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("KEPLER YARD — ASSEMBLY"),
+                Text::new("KEPLER YARD - ASSEMBLY"),
                 TextFont::from_font_size(14.0),
                 TextColor(Color::srgb(0.32, 0.88, 1.0)),
             ));
 
-            // Scrollable Inspector Body
             parent
                 .spawn((
                     ScrollArea,
@@ -448,18 +456,33 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
                             ("Above [T]", AttachAction::AttachTop, None),
                             ("Radial Pair [R]", AttachAction::AttachRadialPair, None),
                             ("Sym 1x/2x [X]", AttachAction::ToggleSymmetry, None),
+                            ("Rot +15 [Q]", AttachAction::RotateLeft, None),
+                            ("Rot -15 [E]", AttachAction::RotateRight, None),
+                            ("Flip Mirror [F]", AttachAction::FlipMirror, None),
                             ("Clone Subtree", AttachAction::DuplicateSelected, None),
                             ("Crossfeed", AttachAction::ToggleCrossfeed, None),
+                            ("Delete [Del]", AttachAction::DeleteSelected, None),
                             ("Stage - [ [ ]", AttachAction::StageDown, None),
                             ("Stage + [ ] ]", AttachAction::StageUp, None),
                             ("Undo [Ctrl+Z]", AttachAction::Undo, None),
                             ("Redo [Ctrl+Y]", AttachAction::Redo, None),
-                            ("Delete [Del]", AttachAction::DeleteSelected, None),
                             ("Rename Craft", AttachAction::ToggleRename, None),
                             ("Save Craft", AttachAction::SaveCraft, Some(UiIconKind::Save)),
-                            ("Crafts Library", AttachAction::ToggleCraftsDrawer, Some(UiIconKind::Load)),
-                            ("Preset: Selene", AttachAction::LoadLunarPreset, Some(UiIconKind::RocketPreset)),
-                            ("Preset: Kepler-I", AttachAction::ResetStarter, Some(UiIconKind::RocketPreset)),
+                            (
+                                "Crafts Library",
+                                AttachAction::ToggleCraftsDrawer,
+                                Some(UiIconKind::Load),
+                            ),
+                            (
+                                "Preset: Selene",
+                                AttachAction::LoadLunarPreset,
+                                Some(UiIconKind::RocketPreset),
+                            ),
+                            (
+                                "Preset: Kepler-I",
+                                AttachAction::ResetStarter,
+                                Some(UiIconKind::RocketPreset),
+                            ),
                         ];
 
                         for (caption, action, icon_kind) in compact_btns {
@@ -474,7 +497,9 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
                                     align_items: AlignItems::Center,
                                     justify_content: JustifyContent::Center,
                                     border: UiRect::all(px(1.0)),
-                                    border_radius: BorderRadius::all(CornerRadius::circular(px(4.0))),
+                                    border_radius: BorderRadius::all(CornerRadius::circular(px(
+                                        4.0,
+                                    ))),
                                     ..default()
                                 },
                                 BackgroundColor(Color::srgba(0.08, 0.14, 0.22, 0.92)),
@@ -504,8 +529,11 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
                                             ImageNode::new(handle.clone()),
                                             Pickable::IGNORE,
                                             Node {
-                                                width: px(14.0),
-                                                height: px(14.0),
+                                                width: px(15.0),
+                                                height: px(15.0),
+                                                min_width: px(15.0),
+                                                min_height: px(15.0),
+                                                flex_shrink: 0.0,
                                                 ..default()
                                             },
                                         ));
@@ -523,7 +551,7 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
                         }
                     });
 
-                    // Craft Library Drawer (toggles via Crafts Library button)
+                    // Craft Library Drawer
                     body.spawn((
                         EditorCraftLibraryBox,
                         Node {
@@ -558,7 +586,7 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
                     });
 
                     body.spawn((
-                        Text::new("STAGE STACK (Click part to select, ▲/▼ to reorder)"),
+                        Text::new("STAGE STACK (Click part to select, ^/v to shift)"),
                         TextFont::from_font_size(11.0),
                         TextColor(Color::srgb(0.32, 0.88, 1.0)),
                     ));
@@ -614,6 +642,9 @@ fn spawn_editor_ui(commands: &mut Commands, icons: &PartIconRegistry) {
                             Node {
                                 width: px(16.0),
                                 height: px(16.0),
+                                min_width: px(16.0),
+                                min_height: px(16.0),
+                                flex_shrink: 0.0,
                                 ..default()
                             },
                         ));
@@ -664,6 +695,9 @@ fn spawn_category_tab(
                 Node {
                     width: px(14.0),
                     height: px(14.0),
+                    min_width: px(14.0),
+                    min_height: px(14.0),
+                    flex_shrink: 0.0,
                     ..default()
                 },
             ));
@@ -715,7 +749,7 @@ fn rebuild_palette_grid_if_dirty(
                 PaletteButton(spec.id.clone()),
                 Node {
                     width: px(80.0),
-                    height: px(82.0),
+                    height: px(84.0),
                     padding: UiRect::all(px(4.0)),
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
@@ -738,8 +772,11 @@ fn rebuild_palette_grid_if_dirty(
                         ImageNode::new(icon_h.clone()),
                         Pickable::IGNORE,
                         Node {
-                            width: px(54.0),
-                            height: px(54.0),
+                            width: px(56.0),
+                            height: px(56.0),
+                            min_width: px(56.0),
+                            min_height: px(56.0),
+                            flex_shrink: 0.0,
                             ..default()
                         },
                     ));
@@ -796,10 +833,11 @@ fn rebuild_stage_and_craft_lists_if_dirty(
             } else {
                 name.to_owned()
             };
-            by_stage
-                .entry(p.stage)
-                .or_default()
-                .push((p.instance_id, label, active_bp.selected_part_id == Some(p.instance_id)));
+            by_stage.entry(p.stage).or_default().push((
+                p.instance_id,
+                label,
+                active_bp.selected_part_id == Some(p.instance_id),
+            ));
         }
 
         commands.entity(stage_root).with_children(|col| {
@@ -815,15 +853,13 @@ fn rebuild_stage_and_craft_lists_if_dirty(
                     } else {
                         Color::srgba(0.20, 0.38, 0.54, 0.45)
                     };
-                    col.spawn((
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::SpaceBetween,
-                            column_gap: px(4.0),
-                            ..default()
-                        },
-                    ))
+                    col.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::SpaceBetween,
+                        column_gap: px(4.0),
+                        ..default()
+                    })
                     .with_children(|row| {
                         row.spawn((
                             Button,
@@ -856,7 +892,7 @@ fn rebuild_stage_and_craft_lists_if_dirty(
                             ));
                         });
 
-                        for (btn_lbl, delta) in [("▼", -1_i32), ("▲", 1_i32)] {
+                        for (btn_lbl, delta) in [("v", -1_i32), ("^", 1_i32)] {
                             row.spawn((
                                 Button,
                                 Hovered::default(),
@@ -866,7 +902,9 @@ fn rebuild_stage_and_craft_lists_if_dirty(
                                     align_items: AlignItems::Center,
                                     justify_content: JustifyContent::Center,
                                     border: UiRect::all(px(1.0)),
-                                    border_radius: BorderRadius::all(CornerRadius::circular(px(3.0))),
+                                    border_radius: BorderRadius::all(CornerRadius::circular(px(
+                                        3.0,
+                                    ))),
                                     ..default()
                                 },
                                 BackgroundColor(Color::srgba(0.08, 0.14, 0.22, 0.90)),
@@ -1070,8 +1108,7 @@ fn rebuild_editor_meshes_if_dirty(
             .copied()
             .unwrap_or_default();
         let selected = active_bp.selected_part_id == Some(part.instance_id);
-        let mirrored = part.attach_kind == AttachKind::RadialRight;
-        let mesh = get_or_build_mesh(&mut assets, &part.spec_id, &spec.shape, mirrored);
+        let mesh = get_or_build_mesh(&mut assets, &part.spec_id, &spec.shape, part.mirrored);
         let material = assets.materials.add(PartMaterial {
             base_color: Vec4::from_array(style.base_color),
             accent_color: Vec4::from_array(style.accent_color),
@@ -1081,7 +1118,7 @@ fn rebuild_editor_meshes_if_dirty(
                 1.0,
                 0.0,
             ),
-            thermal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            thermal: Vec4::new(0.0, 1.0, part_style_id(spec), 0.0),
         });
 
         commands.spawn((
@@ -1127,7 +1164,6 @@ fn handle_editor_canvas_drag_and_drop(
     ghost_q: Query<Entity, With<EditorDragGhost>>,
     mut assets: EditorAssets,
 ) {
-    let _ = &ctx.icons;
     let mouse_buttons = &ctx.mouse_buttons;
     let keys = &ctx.keys;
     let Ok(window) = ctx.windows.single() else {
@@ -1145,6 +1181,7 @@ fn handle_editor_canvas_drag_and_drop(
         return;
     };
     let world_d = DVec2::new(f64::from(world_pos.x), f64::from(world_pos.y));
+    let bypass_snap = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
     if mouse_buttons.just_pressed(MouseButton::Left)
         && in_canvas
@@ -1152,21 +1189,15 @@ fn handle_editor_canvas_drag_and_drop(
     {
         active_bp.selected_part_id = Some(hit_id);
         ed_state.lists_dirty = true;
-        let is_root = active_bp
-            .blueprint
-            .parts
-            .iter()
-            .find(|p| p.instance_id == hit_id)
-            .is_some_and(|p| p.parent_id.is_none());
-        if !is_root {
-            let alt_clone = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-            ed_state.drag = DragPhase::PendingExisting {
-                part_id: hit_id,
-                start_cursor: cursor,
-                start_world: world_d,
-                alt_clone,
-            };
-        }
+        let alt_clone = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+        let ctrl_single = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        ed_state.drag = DragPhase::PendingExisting {
+            part_id: hit_id,
+            start_cursor: cursor,
+            start_world: world_d,
+            alt_clone,
+            ctrl_single,
+        };
     }
 
     let phase = ed_state.drag.clone();
@@ -1187,27 +1218,38 @@ fn handle_editor_canvas_drag_and_drop(
             }
         }
         DragPhase::DraggingNew { spec_id } => {
-            let snap = find_best_snap_target(&active_bp, &ctx.catalog, &spec_id, world_d, None);
+            let snap = if bypass_snap {
+                None
+            } else {
+                find_best_snap_target(&active_bp, &ctx.catalog, &spec_id, world_d, None)
+            };
+            let free_target = find_free_target(&active_bp, world_d);
             let preview_pos = snap.as_ref().map_or(snap_to_grid(world_d), |s| s.local_pos);
             let preview_rot = snap.as_ref().map_or(0.0, |s| s.local_rot);
             let mirrored = snap
                 .as_ref()
                 .is_some_and(|s| s.attach_kind == AttachKind::RadialRight);
+            let style_id = ctx
+                .catalog
+                .sim_catalog
+                .get(&spec_id)
+                .map_or(0.0, part_style_id);
             ed_state.snap_preview = snap.as_ref().map(|s| s.local_pos);
 
             if mouse_buttons.just_released(MouseButton::Left) {
-                if in_canvas && let Some(target) = snap {
-                    ed_state.record_undo(&active_bp.blueprint);
-                    let new_id = attach_with_optional_symmetry(
-                        &mut active_bp.blueprint,
-                        &ctx.catalog,
-                        &target,
-                        &spec_id,
-                        ed_state.symmetry_2x,
-                    );
-                    active_bp.selected_part_id = Some(new_id);
-                    active_bp.dirty = true;
-                    ed_state.status_note = format!("Attached {spec_id}.");
+                if in_canvas
+                    && let Some(target) = snap.or(free_target) {
+                        ed_state.record_undo(&active_bp.blueprint);
+                        let new_id = attach_with_optional_symmetry(
+                            &mut active_bp.blueprint,
+                            &ctx.catalog,
+                            &target,
+                            &spec_id,
+                            ed_state.symmetry_2x,
+                        );
+                        active_bp.selected_part_id = Some(new_id);
+                        active_bp.dirty = true;
+                        ed_state.status_note = format!("Placed {spec_id}.");
                 }
                 ed_state.drag = DragPhase::Idle;
                 ed_state.snap_preview = None;
@@ -1223,6 +1265,7 @@ fn handle_editor_canvas_drag_and_drop(
                         rot: preview_rot,
                         mirrored,
                         snapped: snap.is_some(),
+                        style_id,
                     },
                     &mut assets,
                 );
@@ -1233,13 +1276,20 @@ fn handle_editor_canvas_drag_and_drop(
             start_cursor,
             start_world,
             alt_clone,
+            ctrl_single,
         } => {
             if !mouse_buttons.pressed(MouseButton::Left) {
                 ed_state.drag = DragPhase::Idle;
                 ed_state.snap_preview = None;
             } else if cursor.distance(start_cursor) > DRAG_THRESHOLD_PX {
+                let is_root = active_bp
+                    .blueprint
+                    .parts
+                    .iter()
+                    .find(|p| p.instance_id == part_id)
+                    .is_some_and(|p| p.parent_id.is_none());
                 ed_state.record_undo(&active_bp.blueprint);
-                let active_id = if alt_clone {
+                let active_id = if alt_clone && !is_root {
                     if let Some(cloned_id) = active_bp
                         .blueprint
                         .duplicate_subtree(part_id, DVec2::new(0.2, 0.2))
@@ -1251,23 +1301,28 @@ fn handle_editor_canvas_drag_and_drop(
                         part_id
                     }
                 } else {
+                    if ctrl_single && !is_root {
+                        active_bp.blueprint.reparent_children_to_parent(part_id);
+                    }
                     part_id
                 };
                 ed_state.drag = DragPhase::DraggingExisting {
                     part_id: active_id,
                     last_world: start_world,
+                    is_root,
                 };
             }
         }
         DragPhase::DraggingExisting {
             part_id,
             last_world,
+            is_root,
         } => {
             let delta = world_d - last_world;
             if delta.length_squared() > 1.0e-8 {
                 active_bp.blueprint.translate_subtree(part_id, delta);
                 for (node, mut tf) in &mut node_q {
-                    if active_bp.blueprint.is_in_subtree(part_id, node.instance_id)
+                    if (is_root || active_bp.blueprint.is_in_subtree(part_id, node.instance_id))
                         && let Some(p) = active_bp
                             .blueprint
                             .parts
@@ -1294,13 +1349,11 @@ fn handle_editor_canvas_drag_and_drop(
                 .iter()
                 .find(|p| p.instance_id == part_id)
                 .map_or(world_d, |p| p.local_pos);
-            let snap = find_best_snap_target(
-                &active_bp,
-                &ctx.catalog,
-                &spec_id,
-                curr_pos,
-                Some(part_id),
-            );
+            let snap = if is_root || bypass_snap {
+                None
+            } else {
+                find_best_snap_target(&active_bp, &ctx.catalog, &spec_id, curr_pos, Some(part_id))
+            };
             ed_state.snap_preview = snap.as_ref().map(|s| s.local_pos);
 
             if mouse_buttons.just_released(MouseButton::Left) {
@@ -1316,15 +1369,17 @@ fn handle_editor_canvas_drag_and_drop(
                         p.parent_id = Some(target.parent_id);
                         p.attach_kind = target.attach_kind;
                         p.local_rot = target.local_rot;
+                        p.mirrored = target.attach_kind == AttachKind::RadialRight;
                     }
                     active_bp.dirty = true;
-                    ed_state.status_note = String::from("Snapped moved subtree cleanly.");
+                    ed_state.status_note = String::from("Snapped moved part cleanly.");
                 } else {
                     let snapped = snap_to_grid(curr_pos);
                     active_bp
                         .blueprint
                         .translate_subtree(part_id, snapped - curr_pos);
                     active_bp.dirty = true;
+                    ed_state.status_note = String::from("Placed moved part on grid.");
                 }
                 ed_state.drag = DragPhase::Idle;
                 ed_state.snap_preview = None;
@@ -1332,10 +1387,39 @@ fn handle_editor_canvas_drag_and_drop(
                 ed_state.drag = DragPhase::DraggingExisting {
                     part_id,
                     last_world: world_d,
+                    is_root,
                 };
             }
         }
     }
+}
+
+fn find_free_target(bp: &ActiveBlueprint, cursor_m: DVec2) -> Option<SnapTarget> {
+    let pos = snap_to_grid(cursor_m);
+    let nearest = bp.blueprint.parts.iter().min_by(|a, b| {
+        a.local_pos
+            .distance(pos)
+            .total_cmp(&b.local_pos.distance(pos))
+    })?;
+    let diff = pos - nearest.local_pos;
+    let attach_kind = if diff.x.abs() < 0.35 {
+        if diff.y >= 0.0 {
+            AttachKind::StackTop
+        } else {
+            AttachKind::StackBottom
+        }
+    } else if diff.x < 0.0 {
+        AttachKind::RadialLeft
+    } else {
+        AttachKind::RadialRight
+    };
+    Some(SnapTarget {
+        parent_id: nearest.instance_id,
+        attach_kind,
+        local_pos: pos,
+        local_rot: 0.0,
+        stage: nearest.stage,
+    })
 }
 
 fn attach_with_optional_symmetry(
@@ -1368,7 +1452,11 @@ fn attach_with_optional_symmetry(
         AttachKind::RadialLeft | AttachKind::RadialRight
     );
     if is_radial {
-        if let Some(parent) = bp.parts.iter().find(|p| p.instance_id == target.parent_id).cloned()
+        if let Some(parent) = bp
+            .parts
+            .iter()
+            .find(|p| p.instance_id == target.parent_id)
+            .cloned()
             && parent.local_pos.x.abs() < 0.08
         {
             let opp_kind = if target.attach_kind == AttachKind::RadialLeft {
@@ -1376,13 +1464,14 @@ fn attach_with_optional_symmetry(
             } else {
                 AttachKind::RadialLeft
             };
-            let opp_pos = DVec2::new(2.0 * parent.local_pos.x - target.local_pos.x, target.local_pos.y);
+            let opp_pos =
+                DVec2::new(2.0 * parent.local_pos.x - target.local_pos.x, target.local_pos.y);
             let twin_id = bp.attach_child(
                 target.parent_id,
                 spec_id.to_owned(),
                 opp_kind,
                 snap_to_grid(opp_pos),
-                0.0,
+                -target.local_rot,
                 target.stage,
             );
             bp.set_part_crossfeed(twin_id, default_cf);
@@ -1398,7 +1487,7 @@ fn attach_with_optional_symmetry(
                 spec_id.to_owned(),
                 opp_kind,
                 snap_to_grid(opp_pos),
-                0.0,
+                -target.local_rot,
                 target.stage,
             );
             bp.set_part_crossfeed(twin_id, default_cf);
@@ -1410,7 +1499,7 @@ fn attach_with_optional_symmetry(
             spec_id.to_owned(),
             target.attach_kind,
             snap_to_grid(opp_pos),
-            0.0,
+            -target.local_rot,
             target.stage,
         );
         bp.set_part_crossfeed(twin_id, default_cf);
@@ -1446,7 +1535,7 @@ fn find_best_snap_target(
 ) -> Option<SnapTarget> {
     let new_spec = catalog.sim_catalog.get(new_spec_id)?;
     let mut best: Option<(f64, SnapTarget)> = None;
-    let snap_radius = 1.65;
+    let snap_radius = 1.45;
 
     for parent in &bp.blueprint.parts {
         if let Some(root_id) = moving_subtree_root
@@ -1482,21 +1571,23 @@ fn find_best_snap_target(
             });
         }
 
-        // Allow radial-capable parts on tanks/pods AND any stackable/tank/SRB on radial pylons.
         let is_radial_pylon = matches!(pspec.kind, PartKind::Decoupler(_)) && pspec.radial_attach;
-        if is_radial_pylon && (new_spec.stack_top || new_spec.stack_bottom || new_spec.radial_attach) {
+        if is_radial_pylon && (new_spec.stack_top || new_spec.stack_bottom || new_spec.radial_attach)
+        {
             let dx = 0.5 * pspec.shape.bounding_size().x + 0.5 * new_spec.shape.bounding_size().x;
-            let (kind, sign) = if parent.attach_kind == AttachKind::RadialRight
-                || parent.local_pos.x > 0.0
-            {
-                (AttachKind::RadialRight, 1.0)
-            } else {
-                (AttachKind::RadialLeft, -1.0)
-            };
+            let (kind, sign) =
+                if parent.attach_kind == AttachKind::RadialRight || parent.local_pos.x > 0.0 {
+                    (AttachKind::RadialRight, 1.0)
+                } else {
+                    (AttachKind::RadialLeft, -1.0)
+                };
             candidates.push(SnapTarget {
                 parent_id: parent.instance_id,
                 attach_kind: kind,
-                local_pos: snap_to_grid(DVec2::new(parent.local_pos.x + sign * dx, parent.local_pos.y)),
+                local_pos: snap_to_grid(DVec2::new(
+                    parent.local_pos.x + sign * dx,
+                    parent.local_pos.y,
+                )),
                 local_rot: 0.0,
                 stage: parent.stage,
             });
@@ -1552,7 +1643,7 @@ fn spawn_drag_ghost(
     let style = catalog.visuals.get(spec_id).copied().unwrap_or_default();
     let mesh = get_or_build_mesh(assets, spec_id, &spec.shape, pose.mirrored);
     let mut base = Vec4::from_array(style.base_color);
-    base.w = if pose.snapped { 0.72 } else { 0.42 };
+    base.w = if pose.snapped { 0.80 } else { 0.52 };
     let accent = if pose.snapped {
         Vec4::new(0.25, 0.98, 0.62, 1.0)
     } else {
@@ -1562,7 +1653,7 @@ fn spawn_drag_ghost(
         base_color: base,
         accent_color: accent,
         flags: Vec4::new(2.0, 1.0, 1.0, 0.0),
-        thermal: Vec4::new(0.0, 1.0, 0.0, 0.0),
+        thermal: Vec4::new(0.0, 1.0, pose.style_id, 0.0),
     });
 
     commands.spawn((
@@ -1626,10 +1717,65 @@ fn handle_editor_keyboard_shortcuts(
     }
 
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+
+    // Arrow key nudging of selected part
+    let nudge_step = if shift { 0.025 } else { 0.05 };
+    let mut nudge = DVec2::ZERO;
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        nudge.x -= nudge_step;
+    }
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        nudge.x += nudge_step;
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        nudge.y += nudge_step;
+    }
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        nudge.y -= nudge_step;
+    }
+    if nudge.length_squared() > 0.0
+        && let Some(sel) = active_bp.selected_part_id
+    {
+        ed_state.record_undo(&active_bp.blueprint);
+        active_bp.blueprint.translate_subtree(sel, nudge);
+        if ed_state.symmetry_2x
+            && let Some(twin) = active_bp.blueprint.find_mirror_twin(sel)
+        {
+            active_bp
+                .blueprint
+                .translate_subtree(twin, DVec2::new(-nudge.x, nudge.y));
+        }
+        active_bp.dirty = true;
+        return;
+    }
+
+    if (keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::KeyE))
+        && let Some(sel) = active_bp.selected_part_id
+    {
+        let deg = if shift { 90.0_f64 } else { 15.0_f64 };
+        let rad = if keys.just_pressed(KeyCode::KeyQ) {
+            deg.to_radians()
+        } else {
+            -deg.to_radians()
+        };
+        ed_state.record_undo(&active_bp.blueprint);
+        active_bp.blueprint.rotate_part(sel, rad);
+        if ed_state.symmetry_2x
+            && let Some(twin) = active_bp.blueprint.find_mirror_twin(sel)
+        {
+            active_bp.blueprint.rotate_part(twin, -rad);
+        }
+        active_bp.dirty = true;
+        return;
+    }
+
     let action = if ctrl && keys.just_pressed(KeyCode::KeyZ) {
         Some(AttachAction::Undo)
     } else if ctrl && keys.just_pressed(KeyCode::KeyY) {
         Some(AttachAction::Redo)
+    } else if keys.just_pressed(KeyCode::KeyF) {
+        Some(AttachAction::FlipMirror)
     } else if keys.just_pressed(KeyCode::KeyB) {
         Some(AttachAction::AttachBottom)
     } else if keys.just_pressed(KeyCode::KeyT) {
@@ -1700,6 +1846,44 @@ fn apply_editor_action(
                 String::from("1x single placement mode.")
             };
         }
+        AttachAction::RotateLeft => {
+            if let Some(sel) = active_bp.selected_part_id {
+                let rad = 15.0_f64.to_radians();
+                ed_state.record_undo(&active_bp.blueprint);
+                active_bp.blueprint.rotate_part(sel, rad);
+                if ed_state.symmetry_2x
+                    && let Some(twin) = active_bp.blueprint.find_mirror_twin(sel)
+                {
+                    active_bp.blueprint.rotate_part(twin, -rad);
+                }
+                active_bp.dirty = true;
+            }
+        }
+        AttachAction::RotateRight => {
+            if let Some(sel) = active_bp.selected_part_id {
+                let rad = -15.0_f64.to_radians();
+                ed_state.record_undo(&active_bp.blueprint);
+                active_bp.blueprint.rotate_part(sel, rad);
+                if ed_state.symmetry_2x
+                    && let Some(twin) = active_bp.blueprint.find_mirror_twin(sel)
+                {
+                    active_bp.blueprint.rotate_part(twin, -rad);
+                }
+                active_bp.dirty = true;
+            }
+        }
+        AttachAction::FlipMirror => {
+            if let Some(sel) = active_bp.selected_part_id {
+                ed_state.record_undo(&active_bp.blueprint);
+                active_bp.blueprint.toggle_part_mirrored(sel);
+                if ed_state.symmetry_2x
+                    && let Some(twin) = active_bp.blueprint.find_mirror_twin(sel)
+                {
+                    active_bp.blueprint.toggle_part_mirrored(twin);
+                }
+                active_bp.dirty = true;
+            }
+        }
         AttachAction::DuplicateSelected => {
             if let Some(sel) = active_bp.selected_part_id {
                 ed_state.record_undo(&active_bp.blueprint);
@@ -1729,14 +1913,7 @@ fn apply_editor_action(
                     ed_state.record_undo(&active_bp.blueprint);
                     let new_cf = !part.crossfeed;
                     for id in [Some(sel), twin].into_iter().flatten() {
-                        if let Some(p) = active_bp
-                            .blueprint
-                            .parts
-                            .iter_mut()
-                            .find(|p| p.instance_id == id)
-                        {
-                            p.crossfeed = new_cf;
-                        }
+                        active_bp.blueprint.set_part_crossfeed(id, new_cf);
                     }
                     active_bp.dirty = true;
                     ed_state.status_note = format!(
@@ -1822,7 +1999,8 @@ fn apply_editor_action(
         AttachAction::SaveCraft => match save_craft_blueprint(&active_bp.blueprint) {
             Ok(path) => {
                 ed_state.lists_dirty = true;
-                ed_state.status_note = format!("Saved '{}' ({})", active_bp.blueprint.name, path.display());
+                ed_state.status_note =
+                    format!("Saved '{}' ({})", active_bp.blueprint.name, path.display());
             }
             Err(err) => ed_state.status_note = err,
         },
@@ -1861,11 +2039,11 @@ fn attach_to_selected(
     };
 
     let offset = match kind {
-        AttachKind::StackBottom if parent_spec.stack_bottom && new_spec.stack_top => DVec2::new(
+        AttachKind::StackBottom => DVec2::new(
             0.0,
             parent_spec.shape.bottom_offset().y - new_spec.shape.top_offset().y,
         ),
-        AttachKind::StackTop if parent_spec.stack_top && new_spec.stack_bottom => DVec2::new(
+        AttachKind::StackTop => DVec2::new(
             0.0,
             parent_spec.shape.top_offset().y - new_spec.shape.bottom_offset().y,
         ),
@@ -1953,6 +2131,24 @@ fn draw_editor_gizmos(
     for iy in -24..=24 {
         let p = iy as f32;
         gizmos.line_2d(Vec2::new(-16.0, p), Vec2::new(16.0, p), grid_col);
+    }
+
+    // Show available attach-node anchors while dragging a part
+    if !matches!(ed_state.drag, DragPhase::Idle) {
+        let node_col = Color::srgba(0.28, 0.90, 1.0, 0.55);
+        for part in &active_bp.blueprint.parts {
+            if let Some(spec) = catalog.sim_catalog.get(&part.spec_id) {
+                let p = Vec2::new(part.local_pos.x as f32, part.local_pos.y as f32);
+                if spec.stack_top {
+                    let top = p + Vec2::new(0.0, spec.shape.top_offset().y as f32);
+                    gizmos.circle_2d(top, 0.08, node_col);
+                }
+                if spec.stack_bottom {
+                    let bot = p + Vec2::new(0.0, spec.shape.bottom_offset().y as f32);
+                    gizmos.circle_2d(bot, 0.08, node_col);
+                }
+            }
+        }
     }
 
     // Yellow Center of Mass (CoM) reticle
@@ -2064,7 +2260,11 @@ fn format_analysis_text(
                 .sim_catalog
                 .get(&p.spec_id)
                 .map_or(p.spec_id.as_str(), |s| s.display_name.as_str());
-            format!("{name} (S{})", p.stage + 1)
+            format!(
+                "{name} (S{}, {:.0} deg)",
+                p.stage + 1,
+                p.local_rot.to_degrees()
+            )
         })
         .unwrap_or_else(|| String::from("None"));
 
@@ -2082,7 +2282,7 @@ fn format_analysis_text(
          Selected: {}\n\
          Wet: {:.0} kg  |  Dry: {:.0} kg  |  Fuel: {:.0} kg\n\
          CoM: ({:+.2}, {:+.2})  |  CoP: ({:+.2}, {:+.2}) m\n\
-         MoI: {:.0} kg·m²  |  Total Δv: {:.0} m/s\n",
+         MoI: {:.0} kg*m^2  |  Total dV: {:.0} m/s\n",
         active_bp.blueprint.name,
         name_suffix,
         active_bp.blueprint.parts.len(),
@@ -2109,7 +2309,7 @@ fn format_analysis_text(
     out.push_str("\nSTAGES:\n");
     for s in &a.stages {
         out.push_str(&format!(
-            "  S{}: Δv {:.0} m/s | TWR {:.2} | {:.0} kN{}\n",
+            "  S{}: dV {:.0} m/s | TWR {:.2} | {:.0} kN{}\n",
             s.stage + 1,
             s.delta_v_m_s,
             s.twr_surface,

@@ -3,7 +3,7 @@ PartSpecRon(
     display_name: "SRB-90 'Hammer' Booster",
     category: Propulsion,
     dry_mass_kg: 420.0,
-    shape: RoundedRect(width: 0.95, height: 3.60, corner_radius: 0.10),
+    shape: Booster(width: 0.95, height: 3.60, nozzle_width: 0.86),
     kind: SolidBooster(max_thrust_n: 135000.0, isp_s: 240.0, fuel_capacity_kg: 1950.0),
     stack_top: true,
     stack_bottom: false,

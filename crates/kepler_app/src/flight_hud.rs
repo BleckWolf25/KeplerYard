@@ -1,16 +1,15 @@
 //! @file flight_hud.rs
 //!
-//! @version 1.0.0
+//! @version 1.1.0
 //! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Flight HUD, 2D Navball attitude ring, SAS mode selector, map badges, and pause/recover UI
 //!
 //! @description
-//! Renders the interactive flight telemetry panel, clickable SAS mode buttons (`STAB`, `PRO`,
-//! `RETRO`, `RAD+`, `MAN`), RCS/Vessel/Focus quick controls, screen-projected map badges (`Ap`,
-//! `Pe`, `Encounter`, `Selene`, `Maneuver`), 2D Navball attitude ring gizmo, and the Escape pause,
-//! revert-to-launch, revert-to-VAB, and vessel recovery summary modal.
+//! Renders the ASCII-safe interactive flight telemetry panel, clickable SAS mode buttons, RCS,
+//! vessel/focus controls, screen-projected map badges, 2D Navball attitude ring gizmo, and the
+//! Escape pause, revert-to-launch, revert-to-VAB, and vessel recovery summary modal.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -172,7 +171,6 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
     let border = uniform_border(Color::srgba(0.20, 0.72, 0.94, 0.55));
     let text_col = TextColor(Color::srgb(0.88, 0.96, 1.0));
 
-    // Top-left Telemetry & Guidance Bar
     commands
         .spawn((
             FlightEntity,
@@ -199,7 +197,6 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
                 text_col,
             ));
 
-            // SAS Modes & Guidance Pill Bar
             parent
                 .spawn(Node {
                     flex_direction: FlexDirection::Row,
@@ -209,7 +206,14 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
                     ..default()
                 })
                 .with_children(|bar| {
-                    spawn_hud_btn(bar, "SAS [T]", FlightUiAction::ToggleSas, Some(SasToggleButton), None, None);
+                    spawn_hud_btn(
+                        bar,
+                        "SAS [T]",
+                        FlightUiAction::ToggleSas,
+                        Some(SasToggleButton),
+                        None,
+                        None,
+                    );
                     for mode in [
                         SasMode::Stability,
                         SasMode::Prograde,
@@ -226,10 +230,16 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
                             None,
                         );
                     }
-                    spawn_hud_btn(bar, "RCS [R]", FlightUiAction::ToggleRcs, None, None, Some(RcsToggleButton));
+                    spawn_hud_btn(
+                        bar,
+                        "RCS [R]",
+                        FlightUiAction::ToggleRcs,
+                        None,
+                        None,
+                        Some(RcsToggleButton),
+                    );
                 });
 
-            // Quick Flight Actions Row
             parent
                 .spawn(Node {
                     flex_direction: FlexDirection::Row,
@@ -255,7 +265,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
                 Text::new(
                     "[Space] Stage  [G] Arm Chute  [Shift/Ctrl/Z/X] Throttle\n\
                      [A/D] Steer  [T] SAS  [B] SAS Mode  [R] RCS  [H/N/Q/E] RCS Trans\n\
-                     [M] Plan TLI  [U/J] Pro Δv  [O/L] Rad Δv  [I/K] Lead  [V] Clear\n\
+                     [M] Plan TLI  [U/J] Pro dV  [O/L] Rad dV  [I/K] Lead  [V] Clear\n\
                      [./,] Warp  [P] Pause  [[]/[]] Vessel  [Tab] Focus  [F5/F9] Save/Load\n\
                      [Esc] Flight Menu",
                 ),
@@ -264,7 +274,6 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
             ));
         });
 
-    // Bottom-Right Navball Attitude Text Readout (sits cleanly above the Navball ring)
     commands
         .spawn((
             FlightEntity,
@@ -285,13 +294,12 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
             p.spawn((
                 FlightNavText,
                 Pickable::IGNORE,
-                Text::new("Pitch: +90.0°"),
+                Text::new("Pitch: +90.0 deg"),
                 TextFont::from_font_size(11.0),
                 text_col,
             ));
         });
 
-    // Pre-allocated Floating Map Badges (Pickable::IGNORE so camera zoom/pan never blocks)
     for i in 0..BADGE_SLOTS {
         commands.spawn((
             FlightEntity,
@@ -310,7 +318,6 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
         ));
     }
 
-    // Pause / Revert / Mission Summary Modal
     commands
         .spawn((
             FlightEntity,
@@ -357,9 +364,19 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands) {
                     ));
 
                     spawn_modal_btn(card, "Resume Flight [Esc]", FlightUiAction::Resume, false);
-                    spawn_modal_btn(card, "Revert to Launchpad", FlightUiAction::RevertToLaunchpad, false);
+                    spawn_modal_btn(
+                        card,
+                        "Revert to Launchpad",
+                        FlightUiAction::RevertToLaunchpad,
+                        false,
+                    );
                     spawn_modal_btn(card, "Return to VAB Editor", FlightUiAction::ReturnToVab, false);
-                    spawn_modal_btn(card, "Recover Vessel & End Mission", FlightUiAction::RecoverVessel, true);
+                    spawn_modal_btn(
+                        card,
+                        "Recover Vessel & End Mission",
+                        FlightUiAction::RecoverVessel,
+                        true,
+                    );
                 });
         });
 }
@@ -612,7 +629,6 @@ pub fn draw_navball_gizmo(
     gizmos.circle_2d(center, r, Color::srgba(0.28, 0.78, 0.98, 0.85));
     gizmos.circle_2d(center, r * 0.15, Color::srgba(0.5, 0.65, 0.8, 0.35));
 
-    // Local horizon line perpendicular to radial-up
     let up_d = (v.pos - body.pos).normalize_or_zero();
     let up_v = Vec2::new(up_d.x as f32, up_d.y as f32);
     let horizon_v = Vec2::new(-up_v.y, up_v.x);
@@ -627,7 +643,6 @@ pub fn draw_navball_gizmo(
         Color::srgba(0.45, 0.65, 0.85, 0.35),
     );
 
-    // Vessel nose vector
     let nose_d = DVec2::Y.rotate(v.angle);
     let nose_v = Vec2::new(nose_d.x as f32, nose_d.y as f32);
     gizmos.line_2d(
@@ -637,7 +652,6 @@ pub fn draw_navball_gizmo(
     );
     gizmos.circle_2d(center + nose_v * (r * 0.95), r * 0.08, Color::WHITE);
 
-    // Prograde & Retrograde
     let rel_v = v.vel - body.vel;
     if rel_v.length_squared() > 1.0 {
         let pro_d = rel_v.normalize_or_zero();
@@ -654,7 +668,6 @@ pub fn draw_navball_gizmo(
         );
     }
 
-    // Target Selene indicator
     if let Some(moon) = flight.world.bodies.get(1) {
         let moon_dir_d = (moon.pos - v.pos).normalize_or_zero();
         let moon_v = Vec2::new(moon_dir_d.x as f32, moon_dir_d.y as f32);
@@ -665,7 +678,6 @@ pub fn draw_navball_gizmo(
         );
     }
 
-    // Maneuver burn vector indicator
     if flight.maneuver.enabled
         && let Some(primary) = flight.world.bodies.first()
     {
@@ -861,7 +873,7 @@ fn format_navball_readout(flight: &FlightSimState) -> String {
     let v_horiz = rel_v.dot(east);
 
     format!(
-        "Pitch: {:+.1}°   SAS: {}\n\
+        "Pitch: {:+.1} deg   SAS: {}\n\
          V/S: {:+.1} m/s   H/S: {:+.1} m/s\n\
          RCS: {}   Vessel #{}",
         pitch_deg,
@@ -940,8 +952,13 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
             let closest = flight
                 .last_prediction
                 .planned_closest_moon_dist_m
-                .map_or_else(|| String::from("--"), |d| format!("{:.0} km", (d - 120_000.0) / 1000.0));
-            let dv_tot = (flight.maneuver.prograde_dv_m_s.powi(2) + flight.maneuver.radial_dv_m_s.powi(2)).sqrt();
+                .map_or_else(
+                    || String::from("--"),
+                    |d| format!("{:.0} km", (d - 120_000.0) / 1000.0),
+                );
+            let dv_tot = (flight.maneuver.prograde_dv_m_s.powi(2)
+                + flight.maneuver.radial_dv_m_s.powi(2))
+            .sqrt();
             let max_acc = (v.active_max_thrust_n() / v.total_mass_kg.max(1.0)).max(0.1);
             let burn_s = dv_tot / max_acc;
             format!(
@@ -957,7 +974,7 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
             )
         }
         (Some(est), false) => format!(
-            "Selene Window: in {:.0}s | Est TLI Δv {:.0} m/s",
+            "Selene Window: in {:.0}s | Est TLI dV {:.0} m/s",
             est.lead_time_until_window_s, est.dv1_m_s
         ),
         (None, _) => String::new(),
@@ -972,7 +989,7 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
     };
 
     format!(
-        "TELEMETRY — {} ({})\n\
+        "TELEMETRY - {} ({})\n\
          Status: {}   MET: {:.1} s   Warp: {}x{}\n\
          Alt: {:.2} km   Speed: {:.1} m/s\n\
          Ap: {:.2} km   Pe: {:.2} km   Ecc: {:.4}\n\

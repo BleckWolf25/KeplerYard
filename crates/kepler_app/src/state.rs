@@ -1,15 +1,15 @@
 //! @file state.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Shared game states, floating-origin resources, camera focus, audio cue hooks, and warp
+//! @summary Shared game states, floating-origin resources, camera focus, shader style IDs, and warp
 //!
 //! @description
-//! Defines the Bevy `GameMode` state machine (`Editor` vs `Flight`), the shared live
-//! `ActiveBlueprint`, `FloatingOrigin`, `FlightClock` with physical vs orbital-rails warp caps,
-//! `CameraFocusState`, and an `AudioCueQueue` ready for future sound and music synthesis.
+//! Defines the Bevy `GameMode` state machine, shared `ActiveBlueprint`, `FloatingOrigin`,
+//! `FlightClock`, `CameraFocusState`, `AudioCueQueue`, and `part_style_id` mapping each part
+//! archetype to its procedural shader detail profile.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -17,7 +17,10 @@
 // ---------- IMPORTS
 
 use bevy::prelude::*;
-use sim_core::{DVec2, PartCatalog, VesselBlueprint, default_part_catalog, lunar_capable_blueprint};
+use sim_core::{
+    DVec2, PartCatalog, PartKind, PartSpec, VesselBlueprint, default_part_catalog,
+    lunar_capable_blueprint,
+};
 
 // ---------- CONSTANTS
 
@@ -78,7 +81,6 @@ pub struct CameraFocusState {
     pub target: CameraFocusTarget,
 }
 
-/// Simulation audio cue events queued during flight for future sound & music playback.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AudioCue {
     StageSeparation,
@@ -96,6 +98,25 @@ pub struct AudioCueQueue {
 pub struct StatePlugin;
 
 // ---------- DECLARATIONS / IMPLEMENTATION
+
+/// Maps each `PartSpec` to the procedural shader archetype index consumed by `part_glow.wesl`.
+pub fn part_style_id(spec: &PartSpec) -> f32 {
+    match spec.kind {
+        PartKind::Tank(_) => 0.0,
+        PartKind::CommandPod(pod) if pod.crewed => 1.0,
+        PartKind::CommandPod(_) => 2.0,
+        PartKind::Engine(_) => 3.0,
+        PartKind::SolidBooster(_) => 4.0,
+        PartKind::Decoupler(_) if spec.radial_attach => 6.0,
+        PartKind::Decoupler(_) => 5.0,
+        PartKind::HeatShield(_) => 7.0,
+        PartKind::Fin(_) => 8.0,
+        PartKind::NoseCone(_) => 9.0,
+        PartKind::Parachute(_) => 10.0,
+        PartKind::LandingLeg(_) => 11.0,
+        PartKind::Rcs(_) => 12.0,
+    }
+}
 
 impl Default for PartVisualStyle {
     fn default() -> Self {
@@ -137,6 +158,11 @@ impl Default for LivePartCatalog {
                     base_color: [0.82, 0.84, 0.89, 1.0],
                     accent_color: [0.96, 0.44, 0.16, 1.0],
                     emissive_strength: 1.4,
+                },
+                "tank_small" => PartVisualStyle {
+                    base_color: [0.76, 0.80, 0.86, 1.0],
+                    accent_color: [0.22, 0.72, 0.98, 1.0],
+                    emissive_strength: 1.3,
                 },
                 "tank_large" => PartVisualStyle {
                     base_color: [0.84, 0.86, 0.90, 1.0],
@@ -221,14 +247,12 @@ impl FlightClock {
     }
 }
 
-/// Converts `f64` world coordinates into floating-origin-relative `f32` coordinates.
 #[inline]
 pub fn world_to_render_vec2(world_m: DVec2, origin: FloatingOrigin) -> Vec2 {
     let rel = world_m - origin.origin_m;
     Vec2::new(rel.x as f32, rel.y as f32)
 }
 
-/// Constructs a uniform four-sided `BorderColor`.
 #[inline]
 pub const fn uniform_border(color: Color) -> BorderColor {
     BorderColor {

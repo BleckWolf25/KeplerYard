@@ -1,15 +1,15 @@
 //! @file procedural_mesh.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Procedural 2D mesh builders generating mirrored fins, landing struts, plumes, and FX
+//! @summary Multi-ring SFS-inspired procedural 2D rocket meshes with per-ring cylindrical UVs
 //!
 //! @description
-//! Constructs UV-mapped CCW triangle meshes in pure code from `PartShape` data (rounded tanks,
-//! tapered capsules, pinched nozzles, mirrored left/right delta fins, landing struts, parachute
-//! domes, deployed canopies, engine plumes, reentry plasma, rings, and effect quads).
+//! Builds curved multi-ring CCW triangle meshes for pods, parabolic De Laval nozzles, solid
+//! boosters with nose cones and flared exhaust skirts, rounded tanks, mirrored delta fins,
+//! landing struts, parachute canisters, and multi-gore deployed canopies.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -27,8 +27,6 @@ use sim_core::PartShape;
 
 // ---------- DECLARATIONS / IMPLEMENTATION
 
-/// Generates a 2D UV-mapped Bevy `Mesh` matching the exact SI meter footprint of `shape`.
-/// `mirrored` flips asymmetric radial shapes (fins, landing struts) horizontally while keeping CCW winding.
 pub fn build_part_mesh(shape: &PartShape, mirrored: bool) -> Mesh {
     match *shape {
         PartShape::RoundedRect {
@@ -40,7 +38,7 @@ pub fn build_part_mesh(shape: &PartShape, mirrored: bool) -> Mesh {
             bottom_width,
             top_width,
             height,
-        } => build_trapezoid_mesh(bottom_width as f32, top_width as f32, height as f32),
+        } => build_capsule_cone_mesh(bottom_width as f32, top_width as f32, height as f32),
         PartShape::Nozzle {
             mount_width,
             throat_width,
@@ -69,16 +67,15 @@ pub fn build_part_mesh(shape: &PartShape, mirrored: bool) -> Mesh {
             width,
             height,
             foot_span,
-        } => build_landing_strut_mesh(
-            width as f32,
-            height as f32,
-            foot_span as f32,
-            mirrored,
-        ),
+        } => build_landing_strut_mesh(width as f32, height as f32, foot_span as f32, mirrored),
+        PartShape::Booster {
+            width,
+            height,
+            nozzle_width,
+        } => build_booster_mesh(width as f32, height as f32, nozzle_width as f32),
     }
 }
 
-/// Centered UV-mapped unit/sized quad for starfield, launchpad gantry, and FX bursts.
 pub fn build_quad_mesh(width: f32, height: f32) -> Mesh {
     let hw = width * 0.5;
     let hh = height * 0.5;
@@ -88,12 +85,11 @@ pub fn build_quad_mesh(width: f32, height: f32) -> Mesh {
         [hw, -hh, 0.0],
         [-hw, -hh, 0.0],
     ];
-    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let uvs = vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
     let indices = vec![0, 3, 2, 0, 2, 1];
     assemble_2d_mesh(positions, uvs, indices)
 }
 
-/// Hollow circular shockwave ring mesh for staging/impact visual feedback.
 pub fn build_ring_mesh(inner_r: f32, outer_r: f32, segments: usize) -> Mesh {
     let segs = segments.max(12);
     let mut positions = Vec::with_capacity((segs + 1) * 2);
@@ -120,7 +116,6 @@ pub fn build_ring_mesh(inner_r: f32, outer_r: f32, segments: usize) -> Mesh {
     assemble_2d_mesh(positions, uvs, indices)
 }
 
-/// Builds a UV-mapped quad `[0..1]` anchored below an engine nozzle for plume shaders.
 pub fn build_plume_quad(width: f32, length: f32) -> Mesh {
     let hw = width * 0.5;
     let positions = vec![
@@ -134,7 +129,6 @@ pub fn build_plume_quad(width: f32, length: f32) -> Mesh {
     assemble_2d_mesh(positions, uvs, indices)
 }
 
-/// Builds a bow-shock quad oriented along `+Y` (forward) for the reentry plasma shader.
 pub fn build_reentry_quad(width: f32, length: f32) -> Mesh {
     let hw = width * 0.5;
     let positions = vec![
@@ -148,10 +142,10 @@ pub fn build_reentry_quad(width: f32, length: f32) -> Mesh {
     assemble_2d_mesh(positions, uvs, indices)
 }
 
-/// Builds a deployed parachute canopy + shroud triangle silhouette extending upward (`+Y`).
+/// Multi-gore arched parachute canopy + shroud triangle fan extending upward (`+Y`).
 pub fn build_deployed_chute_mesh(canopy_width: f32, riser_height: f32) -> Mesh {
     let hw = canopy_width * 0.5;
-    let segs = 12_usize;
+    let segs = 16_usize;
     let mut positions = Vec::with_capacity(segs + 2);
     let mut uvs = Vec::with_capacity(segs + 2);
     positions.push([0.0, 0.0, 0.0]);
@@ -161,7 +155,7 @@ pub fn build_deployed_chute_mesh(canopy_width: f32, riser_height: f32) -> Mesh {
         let t = i as f32 / segs as f32;
         let ang = core::f32::consts::PI * t;
         let x = -hw * ang.cos();
-        let y = riser_height + 0.35 * canopy_width * ang.sin();
+        let y = riser_height + 0.38 * canopy_width * ang.sin();
         positions.push([x, y, 0.0]);
         uvs.push([t, 1.0]);
     }
@@ -171,6 +165,33 @@ pub fn build_deployed_chute_mesh(canopy_width: f32, riser_height: f32) -> Mesh {
         indices.push(0);
         indices.push(1 + i as u32);
         indices.push(2 + i as u32);
+    }
+    assemble_2d_mesh(positions, uvs, indices)
+}
+
+/// Builds a multi-ring symmetric mesh from bottom-to-top `(y, width)` slices with cylindrical UVs.
+fn build_stacked_strip_mesh(rings: &[(f32, f32)], total_h: f32) -> Mesh {
+    let h = total_h.max(0.05);
+    let mut positions = Vec::with_capacity(rings.len() * 2);
+    let mut uvs = Vec::with_capacity(rings.len() * 2);
+    for &(y, w) in rings {
+        let hw = (w * 0.5).max(0.01);
+        let v = (y / h + 0.5).clamp(0.0, 1.0);
+        positions.push([-hw, y, 0.0]);
+        uvs.push([0.0, v]);
+        positions.push([hw, y, 0.0]);
+        uvs.push([1.0, v]);
+    }
+
+    let mut indices = Vec::with_capacity(rings.len().saturating_sub(1) * 6);
+    for i in 0..rings.len().saturating_sub(1) {
+        let b = (i * 2) as u32;
+        indices.push(b);
+        indices.push(b + 1);
+        indices.push(b + 3);
+        indices.push(b);
+        indices.push(b + 3);
+        indices.push(b + 2);
     }
     assemble_2d_mesh(positions, uvs, indices)
 }
@@ -202,56 +223,63 @@ fn build_rounded_rect_mesh(w: f32, h: f32, radius: f32) -> Mesh {
     fan_polygon(&ring, w, h)
 }
 
-fn build_trapezoid_mesh(bottom_w: f32, top_w: f32, h: f32) -> Mesh {
-    let hb = bottom_w * 0.5;
-    let ht = top_w * 0.5;
+fn build_capsule_cone_mesh(bottom_w: f32, top_w: f32, h: f32) -> Mesh {
     let hh = h * 0.5;
-    let ring = [
-        Vec2::new(-hb, -hh),
-        Vec2::new(hb, -hh),
-        Vec2::new(ht, hh),
-        Vec2::new(-ht, hh),
-    ];
-    fan_polygon(&ring, bottom_w.max(top_w), h)
+    let steps = 8_usize;
+    let mut rings = Vec::with_capacity(steps + 1);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let y = -hh + t * h;
+        let curve = if top_w < bottom_w * 0.4 {
+            t.powf(1.22)
+        } else {
+            t
+        };
+        let w = bottom_w * (1.0 - curve) + top_w * curve;
+        rings.push((y, w));
+    }
+    build_stacked_strip_mesh(&rings, h)
 }
 
 fn build_dome_mesh(w: f32, h: f32) -> Mesh {
-    let hw = w * 0.5;
     let hh = h * 0.5;
-    let segs = 10_usize;
-    let mut ring = Vec::with_capacity(segs + 2);
-    ring.push(Vec2::new(-hw, -hh));
-    ring.push(Vec2::new(hw, -hh));
-    for i in 0..=segs {
-        let t = i as f32 / segs as f32;
-        let ang = core::f32::consts::PI * t;
-        ring.push(Vec2::new(hw * ang.cos(), -hh + h * ang.sin()));
+    let steps = 8_usize;
+    let mut rings = Vec::with_capacity(steps + 1);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let y = -hh + t * h;
+        let rw = w * (1.0 - t * t * 0.88).max(0.04).sqrt();
+        rings.push((y, rw));
     }
-    fan_polygon(&ring, w, h)
+    build_stacked_strip_mesh(&rings, h)
 }
 
 fn build_nozzle_mesh(mount_w: f32, throat_w: f32, bell_w: f32, h: f32) -> Mesh {
-    let hm = mount_w * 0.5;
-    let ht = throat_w * 0.5;
-    let hb = bell_w * 0.5;
     let hh = h * 0.5;
-    let y_throat = h * 0.14;
-
-    let positions = vec![
-        [-hm, hh, 0.0],
-        [hm, hh, 0.0],
-        [ht, y_throat, 0.0],
-        [-ht, y_throat, 0.0],
-        [hb, -hh, 0.0],
-        [-hb, -hh, 0.0],
+    let rings = [
+        (-hh, bell_w),
+        (-hh + h * 0.18, bell_w * 0.94),
+        (-hh + h * 0.38, bell_w * 0.78),
+        (-hh + h * 0.56, throat_w * 1.12),
+        (-hh + h * 0.66, throat_w),
+        (-hh + h * 0.76, mount_w * 0.78),
+        (-hh + h * 0.88, mount_w * 0.96),
+        (hh, mount_w),
     ];
-    let max_w = mount_w.max(bell_w).max(0.1);
-    let uvs: Vec<[f32; 2]> = positions
-        .iter()
-        .map(|p| [(p[0] / max_w) + 0.5, (p[1] / h.max(0.1)) + 0.5])
-        .collect();
-    let indices = vec![0, 3, 2, 0, 2, 1, 3, 5, 4, 3, 4, 2];
-    assemble_2d_mesh(positions, uvs, indices)
+    build_stacked_strip_mesh(&rings, h)
+}
+
+fn build_booster_mesh(w: f32, h: f32, nozzle_w: f32) -> Mesh {
+    let hh = h * 0.5;
+    let rings = [
+        (-hh, nozzle_w),
+        (-hh + h * 0.08, nozzle_w * 0.52),
+        (-hh + h * 0.13, w * 0.96),
+        (-hh + h * 0.85, w),
+        (-hh + h * 0.92, w * 0.68),
+        (hh, w * 0.18),
+    ];
+    build_stacked_strip_mesh(&rings, h)
 }
 
 fn build_fin_mesh(
