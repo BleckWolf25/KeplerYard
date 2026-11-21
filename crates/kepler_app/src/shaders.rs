@@ -1,16 +1,15 @@
 //! @file shaders.rs
 //!
-//! @version 1.0.0
+//! @version 1.2.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Bevy 0.20 custom WESL 2D materials for atmospheric scattering, turbulent plumes, and parts
+//! @summary Bevy 0.20 custom WESL 2D materials for atmospheres, plumes, reentry plasma, and parts
 //!
 //! @description
 //! Registers `Material2dPlugin` pipelines backed by hot-reloadable `.wesl` fragment shaders:
-//! `AtmosphereMaterial` (analytic shifted-origin planet surface + exponential atmosphere glow),
-//! `PlumeMaterial` (additive turbulent exhaust + Mach shock diamonds), and `PartMaterial` (vector
-//! panel bevels, emissive telemetry bars, and editor selection highlights).
+//! `AtmosphereMaterial` (with sun terminator & surface detail), `PlumeMaterial` (pressure-aware),
+//! `ReentryMaterial`, and `PartMaterial` (with separated highlight vs thermal incandescent glow).
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -36,6 +35,8 @@ pub struct AtmosphereMaterial {
     pub surface_color: Vec4,
     #[uniform(0)]
     pub atmo_color: Vec4,
+    #[uniform(0)]
+    pub sun_and_detail: Vec4,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
@@ -49,6 +50,16 @@ pub struct PlumeMaterial {
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
+pub struct ReentryMaterial {
+    #[uniform(0)]
+    pub params: Vec4,
+    #[uniform(0)]
+    pub plasma_color: Vec4,
+    #[uniform(0)]
+    pub wake_color: Vec4,
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 pub struct PartMaterial {
     #[uniform(0)]
     pub base_color: Vec4,
@@ -56,6 +67,8 @@ pub struct PartMaterial {
     pub accent_color: Vec4,
     #[uniform(0)]
     pub flags: Vec4,
+    #[uniform(0)]
+    pub thermal: Vec4,
 }
 
 pub struct KeplerShadersPlugin;
@@ -82,6 +95,16 @@ impl Material2d for PlumeMaterial {
     }
 }
 
+impl Material2d for ReentryMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/reentry.wesl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+}
+
 impl Material2d for PartMaterial {
     fn fragment_shader() -> ShaderRef {
         "shaders/part_glow.wesl".into()
@@ -97,6 +120,7 @@ impl Plugin for KeplerShadersPlugin {
         app.add_plugins((
             Material2dPlugin::<AtmosphereMaterial>::default(),
             Material2dPlugin::<PlumeMaterial>::default(),
+            Material2dPlugin::<ReentryMaterial>::default(),
             Material2dPlugin::<PartMaterial>::default(),
         ));
     }

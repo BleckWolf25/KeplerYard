@@ -1,0 +1,17 @@
+PartSpecRon(
+    id: "srb_radial",
+    display_name: "SRB-90 'Hammer' Booster",
+    category: Propulsion,
+    dry_mass_kg: 420.0,
+    shape: RoundedRect(width: 0.95, height: 3.60, corner_radius: 0.10),
+    kind: SolidBooster(max_thrust_n: 135000.0, isp_s: 240.0, fuel_capacity_kg: 1950.0),
+    stack_top: true,
+    stack_bottom: false,
+    radial_attach: true,
+    drag_coeff: 0.34,
+    max_impact_m_s: 11.0,
+    max_temp_k: 1550.0,
+    base_color: (0.86, 0.87, 0.90, 1.0),
+    accent_color: (1.00, 0.36, 0.12, 1.0),
+    emissive_strength: 1.7,
+)

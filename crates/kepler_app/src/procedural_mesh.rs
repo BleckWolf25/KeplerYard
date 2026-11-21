@@ -1,15 +1,15 @@
 //! @file procedural_mesh.rs
 //!
-//! @version 1.0.0
+//! @version 1.2.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Procedural 2D mesh builders generating vector geometry directly from RON part specs
+//! @summary Procedural 2D mesh builders generating mirrored fins, landing struts, plumes, and FX
 //!
 //! @description
-//! Constructs UV-mapped triangle meshes in pure code from `PartShape` data (rounded tanks,
-//! tapered capsules, pinched rocket nozzles, and swept delta fins) so part physics footprints
-//! and visual silhouettes are generated from a single source of truth with zero DCC tools.
+//! Constructs UV-mapped CCW triangle meshes in pure code from `PartShape` data (rounded tanks,
+//! tapered capsules, pinched nozzles, mirrored left/right delta fins, landing struts, parachute
+//! domes, deployed canopies, engine plumes, reentry plasma, rings, and effect quads).
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -28,7 +28,8 @@ use sim_core::PartShape;
 // ---------- DECLARATIONS / IMPLEMENTATION
 
 /// Generates a 2D UV-mapped Bevy `Mesh` matching the exact SI meter footprint of `shape`.
-pub fn build_part_mesh(shape: &PartShape) -> Mesh {
+/// `mirrored` flips asymmetric radial shapes (fins, landing struts) horizontally while keeping CCW winding.
+pub fn build_part_mesh(shape: &PartShape, mirrored: bool) -> Mesh {
     match *shape {
         PartShape::RoundedRect {
             width,
@@ -61,8 +62,62 @@ pub fn build_part_mesh(shape: &PartShape) -> Mesh {
             tip_chord as f32,
             span as f32,
             sweep as f32,
+            mirrored,
+        ),
+        PartShape::Dome { width, height } => build_dome_mesh(width as f32, height as f32),
+        PartShape::LandingStrut {
+            width,
+            height,
+            foot_span,
+        } => build_landing_strut_mesh(
+            width as f32,
+            height as f32,
+            foot_span as f32,
+            mirrored,
         ),
     }
+}
+
+/// Centered UV-mapped unit/sized quad for starfield, launchpad gantry, and FX bursts.
+pub fn build_quad_mesh(width: f32, height: f32) -> Mesh {
+    let hw = width * 0.5;
+    let hh = height * 0.5;
+    let positions = vec![
+        [-hw, hh, 0.0],
+        [hw, hh, 0.0],
+        [hw, -hh, 0.0],
+        [-hw, -hh, 0.0],
+    ];
+    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let indices = vec![0, 3, 2, 0, 2, 1];
+    assemble_2d_mesh(positions, uvs, indices)
+}
+
+/// Hollow circular shockwave ring mesh for staging/impact visual feedback.
+pub fn build_ring_mesh(inner_r: f32, outer_r: f32, segments: usize) -> Mesh {
+    let segs = segments.max(12);
+    let mut positions = Vec::with_capacity((segs + 1) * 2);
+    let mut uvs = Vec::with_capacity((segs + 1) * 2);
+    for i in 0..=segs {
+        let t = i as f32 / segs as f32;
+        let ang = t * core::f32::consts::TAU;
+        let (s, c) = ang.sin_cos();
+        positions.push([c * inner_r, s * inner_r, 0.0]);
+        uvs.push([0.5, 0.2]);
+        positions.push([c * outer_r, s * outer_r, 0.0]);
+        uvs.push([0.5, 0.8]);
+    }
+    let mut indices = Vec::with_capacity(segs * 6);
+    for i in 0..segs {
+        let base = (i * 2) as u32;
+        indices.push(base);
+        indices.push(base + 1);
+        indices.push(base + 3);
+        indices.push(base);
+        indices.push(base + 3);
+        indices.push(base + 2);
+    }
+    assemble_2d_mesh(positions, uvs, indices)
 }
 
 /// Builds a UV-mapped quad `[0..1]` anchored below an engine nozzle for plume shaders.
@@ -76,6 +131,47 @@ pub fn build_plume_quad(width: f32, length: f32) -> Mesh {
     ];
     let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     let indices = vec![0, 3, 2, 0, 2, 1];
+    assemble_2d_mesh(positions, uvs, indices)
+}
+
+/// Builds a bow-shock quad oriented along `+Y` (forward) for the reentry plasma shader.
+pub fn build_reentry_quad(width: f32, length: f32) -> Mesh {
+    let hw = width * 0.5;
+    let positions = vec![
+        [-hw, 0.35 * length, 0.0],
+        [hw, 0.35 * length, 0.0],
+        [hw, -0.65 * length, 0.0],
+        [-hw, -0.65 * length, 0.0],
+    ];
+    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let indices = vec![0, 3, 2, 0, 2, 1];
+    assemble_2d_mesh(positions, uvs, indices)
+}
+
+/// Builds a deployed parachute canopy + shroud triangle silhouette extending upward (`+Y`).
+pub fn build_deployed_chute_mesh(canopy_width: f32, riser_height: f32) -> Mesh {
+    let hw = canopy_width * 0.5;
+    let segs = 12_usize;
+    let mut positions = Vec::with_capacity(segs + 2);
+    let mut uvs = Vec::with_capacity(segs + 2);
+    positions.push([0.0, 0.0, 0.0]);
+    uvs.push([0.5, 0.0]);
+
+    for i in 0..=segs {
+        let t = i as f32 / segs as f32;
+        let ang = core::f32::consts::PI * t;
+        let x = -hw * ang.cos();
+        let y = riser_height + 0.35 * canopy_width * ang.sin();
+        positions.push([x, y, 0.0]);
+        uvs.push([t, 1.0]);
+    }
+
+    let mut indices = Vec::with_capacity(segs * 3);
+    for i in 0..segs {
+        indices.push(0);
+        indices.push(1 + i as u32);
+        indices.push(2 + i as u32);
+    }
     assemble_2d_mesh(positions, uvs, indices)
 }
 
@@ -119,6 +215,21 @@ fn build_trapezoid_mesh(bottom_w: f32, top_w: f32, h: f32) -> Mesh {
     fan_polygon(&ring, bottom_w.max(top_w), h)
 }
 
+fn build_dome_mesh(w: f32, h: f32) -> Mesh {
+    let hw = w * 0.5;
+    let hh = h * 0.5;
+    let segs = 10_usize;
+    let mut ring = Vec::with_capacity(segs + 2);
+    ring.push(Vec2::new(-hw, -hh));
+    ring.push(Vec2::new(hw, -hh));
+    for i in 0..=segs {
+        let t = i as f32 / segs as f32;
+        let ang = core::f32::consts::PI * t;
+        ring.push(Vec2::new(hw * ang.cos(), -hh + h * ang.sin()));
+    }
+    fan_polygon(&ring, w, h)
+}
+
 fn build_nozzle_mesh(mount_w: f32, throat_w: f32, bell_w: f32, h: f32) -> Mesh {
     let hm = mount_w * 0.5;
     let ht = throat_w * 0.5;
@@ -143,26 +254,77 @@ fn build_nozzle_mesh(mount_w: f32, throat_w: f32, bell_w: f32, h: f32) -> Mesh {
     assemble_2d_mesh(positions, uvs, indices)
 }
 
-fn build_fin_mesh(root_chord: f32, tip_chord: f32, span: f32, sweep: f32) -> Mesh {
+fn build_fin_mesh(
+    root_chord: f32,
+    tip_chord: f32,
+    span: f32,
+    sweep: f32,
+    mirrored: bool,
+) -> Mesh {
     let hx = span * 0.5;
     let hy = root_chord * 0.5;
     let tip_top = hy - sweep;
     let tip_bot = tip_top - tip_chord;
     let inv_w = 1.0 / span.max(0.05);
     let inv_h = 1.0 / root_chord.max(0.05);
+    let sx = if mirrored { -1.0 } else { 1.0 };
 
     let pts = [
-        [hx, hy, 0.0],
-        [hx, -hy, 0.0],
-        [-hx, tip_bot, 0.0],
-        [-hx, tip_top, 0.0],
+        [sx * hx, hy, 0.0],
+        [sx * hx, -hy, 0.0],
+        [-sx * hx, tip_bot, 0.0],
+        [-sx * hx, tip_top, 0.0],
     ];
     let uvs = pts
         .iter()
         .map(|p| [p[0] * inv_w + 0.5, p[1] * inv_h + 0.5])
         .collect();
-    let indices = vec![0, 2, 1, 0, 3, 2];
+    let indices = if mirrored {
+        vec![0, 1, 2, 0, 2, 3]
+    } else {
+        vec![0, 2, 1, 0, 3, 2]
+    };
     assemble_2d_mesh(pts.to_vec(), uvs, indices)
+}
+
+fn build_landing_strut_mesh(w: f32, h: f32, foot_span: f32, mirrored: bool) -> Mesh {
+    let bound_w = w.max(foot_span);
+    let hx = bound_w * 0.5;
+    let hy = h * 0.5;
+    let s = if mirrored { -1.0 } else { 1.0 };
+
+    let pts = vec![
+        [s * hx * 0.45, hy * 0.92, 0.0],
+        [s * hx * 0.95, hy * 0.92, 0.0],
+        [-s * hx * 0.25, -hy * 0.84, 0.0],
+        [-s * hx * 0.72, -hy * 0.84, 0.0],
+        [-s * hx * 0.96, -hy * 0.80, 0.0],
+        [-s * hx * 0.08, -hy * 0.80, 0.0],
+        [-s * hx * 0.08, -hy, 0.0],
+        [-s * hx * 0.96, -hy, 0.0],
+        [s * hx * 0.65, -hy * 0.15, 0.0],
+        [s * hx * 0.95, -hy * 0.15, 0.0],
+        [-s * hx * 0.22, -hy * 0.72, 0.0],
+        [-s * hx * 0.42, -hy * 0.72, 0.0],
+    ];
+
+    let inv_w = 1.0 / bound_w.max(0.05);
+    let inv_h = 1.0 / h.max(0.05);
+    let uvs = pts
+        .iter()
+        .map(|p| [p[0] * inv_w + 0.5, p[1] * inv_h + 0.5])
+        .collect();
+
+    let mut indices = Vec::with_capacity(18);
+    for qi in 0..3_u32 {
+        let b = qi * 4;
+        if mirrored {
+            indices.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+        } else {
+            indices.extend_from_slice(&[b, b + 2, b + 1, b, b + 3, b + 2]);
+        }
+    }
+    assemble_2d_mesh(pts, uvs, indices)
 }
 
 fn fan_polygon(ring: &[Vec2], bound_w: f32, bound_h: f32) -> Mesh {

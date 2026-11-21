@@ -1,15 +1,15 @@
 //! @file part_catalog.rs
 //!
-//! @version 1.0.0
+//! @version 1.2.0
 //! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Hot-reloadable RON part asset loader and live catalog synchronization
+//! @summary Hot-reloadable RON part asset discovery, loader, and live catalog synchronization
 //!
 //! @description
-//! Implements Bevy 0.20 `AssetLoader` for `*.part.ron` files via `serde` and `ron`, loads all
-//! part specifications at startup, and reacts to `AssetEvent<PartSpecAsset>` modifications so
-//! tweaking mass, thrust, Isp, or dimensions on disk updates the editor and visuals immediately.
+//! Discovers all `*.part.ron` files in `assets/parts/` automatically (with built-in fallback list)
+//! and implements Bevy 0.20 `AssetLoader` for `PartSpecAsset` via `serde` and `ron`, syncing
+//! hot-reloaded part edits into `LivePartCatalog` immediately.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
@@ -22,20 +22,32 @@ use bevy::asset::{AssetLoader, LoadContext};
 use bevy::prelude::*;
 use serde::Deserialize;
 use sim_core::{
-    DecouplerSpec, EngineSpec, FinSpec, ParachuteSpec, PartKind, PartShape, PartSpec, PodSpec,
-    RcsSpec, TankSpec,
+    DecouplerSpec, EngineSpec, FinSpec, HeatShieldSpec, LandingLegSpec, NoseConeSpec,
+    ParachuteSpec, PartCategory, PartKind, PartShape, PartSpec, PodSpec, RcsSpec, SrbSpec,
+    TankSpec,
 };
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 // ---------- CONSTANTS
 
-const PART_ASSET_PATHS: [&str; 7] = [
+const FALLBACK_PART_ASSET_PATHS: [&str; 17] = [
     "parts/command_pod.part.ron",
+    "parts/probe_core.part.ron",
+    "parts/parachute_mk1.part.ron",
+    "parts/heat_shield.part.ron",
+    "parts/nosecone.part.ron",
     "parts/tank_small.part.ron",
     "parts/tank_large.part.ron",
+    "parts/tank_heavy.part.ron",
     "parts/engine_orbital.part.ron",
     "parts/engine_booster.part.ron",
+    "parts/engine_heavy.part.ron",
+    "parts/srb_radial.part.ron",
+    "parts/rcs_block.part.ron",
     "parts/decoupler_stack.part.ron",
+    "parts/decoupler_radial.part.ron",
+    "parts/landing_leg.part.ron",
     "parts/fin_basic.part.ron",
 ];
 
@@ -46,6 +58,7 @@ const PART_ASSET_PATHS: [&str; 7] = [
 pub struct PartSpecRon {
     pub id: String,
     pub display_name: String,
+    pub category: PartCategoryRon,
     pub dry_mass_kg: f64,
     pub shape: PartShapeRon,
     pub kind: PartKindRon,
@@ -54,9 +67,19 @@ pub struct PartSpecRon {
     pub radial_attach: bool,
     pub drag_coeff: f64,
     pub max_impact_m_s: f64,
+    pub max_temp_k: f64,
     pub base_color: [f32; 4],
     pub accent_color: [f32; 4],
     pub emissive_strength: f32,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug)]
+pub enum PartCategoryRon {
+    Command,
+    Propulsion,
+    FuelTanks,
+    AeroAndThermal,
+    Structural,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -83,12 +106,23 @@ pub enum PartShapeRon {
         span: f64,
         sweep: f64,
     },
+    Dome {
+        width: f64,
+        height: f64,
+    },
+    LandingStrut {
+        width: f64,
+        height: f64,
+        foot_span: f64,
+    },
 }
 
 #[derive(Deserialize, Clone, Debug)]
 pub enum PartKindRon {
     CommandPod {
         reaction_torque_nm: f64,
+        #[serde(default = "default_true")]
+        crewed: bool,
     },
     Tank {
         fuel_capacity_kg: f64,
@@ -97,6 +131,11 @@ pub enum PartKindRon {
         max_thrust_n: f64,
         isp_s: f64,
         gimbal_range_rad: f64,
+    },
+    SolidBooster {
+        max_thrust_n: f64,
+        isp_s: f64,
+        fuel_capacity_kg: f64,
     },
     Decoupler {
         ejection_impulse_ns: f64,
@@ -111,6 +150,16 @@ pub enum PartKindRon {
     },
     Parachute {
         deployed_drag_area_m2: f64,
+    },
+    HeatShield {
+        ablator_kg: f64,
+        wake_shield_factor: f64,
+    },
+    LandingLeg {
+        impact_tolerance_m_s: f64,
+    },
+    NoseCone {
+        drag_reduction: f64,
     },
 }
 
@@ -139,6 +188,10 @@ pub struct PartCatalogPlugin;
 
 // ---------- DECLARATIONS / IMPLEMENTATION
 
+const fn default_true() -> bool {
+    true
+}
+
 impl fmt::Display for PartLoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -166,6 +219,18 @@ impl From<std::str::Utf8Error> for PartLoadError {
 impl From<ron::error::SpannedError> for PartLoadError {
     fn from(value: ron::error::SpannedError) -> Self {
         Self::Ron(value)
+    }
+}
+
+impl From<PartCategoryRon> for PartCategory {
+    fn from(value: PartCategoryRon) -> Self {
+        match value {
+            PartCategoryRon::Command => Self::Command,
+            PartCategoryRon::Propulsion => Self::Propulsion,
+            PartCategoryRon::FuelTanks => Self::FuelTanks,
+            PartCategoryRon::AeroAndThermal => Self::AeroAndThermal,
+            PartCategoryRon::Structural => Self::Structural,
+        }
     }
 }
 
@@ -212,6 +277,16 @@ impl From<PartShapeRon> for PartShape {
                 span,
                 sweep,
             },
+            PartShapeRon::Dome { width, height } => Self::Dome { width, height },
+            PartShapeRon::LandingStrut {
+                width,
+                height,
+                foot_span,
+            } => Self::LandingStrut {
+                width,
+                height,
+                foot_span,
+            },
         }
     }
 }
@@ -219,9 +294,13 @@ impl From<PartShapeRon> for PartShape {
 impl From<PartKindRon> for PartKind {
     fn from(value: PartKindRon) -> Self {
         match value {
-            PartKindRon::CommandPod { reaction_torque_nm } => {
-                Self::CommandPod(PodSpec { reaction_torque_nm })
-            }
+            PartKindRon::CommandPod {
+                reaction_torque_nm,
+                crewed,
+            } => Self::CommandPod(PodSpec {
+                reaction_torque_nm,
+                crewed,
+            }),
             PartKindRon::Tank { fuel_capacity_kg } => Self::Tank(TankSpec { fuel_capacity_kg }),
             PartKindRon::Engine {
                 max_thrust_n,
@@ -231,6 +310,15 @@ impl From<PartKindRon> for PartKind {
                 max_thrust_n,
                 isp_s,
                 gimbal_range_rad,
+            }),
+            PartKindRon::SolidBooster {
+                max_thrust_n,
+                isp_s,
+                fuel_capacity_kg,
+            } => Self::SolidBooster(SrbSpec {
+                max_thrust_n,
+                isp_s,
+                fuel_capacity_kg,
             }),
             PartKindRon::Decoupler {
                 ejection_impulse_ns,
@@ -246,6 +334,21 @@ impl From<PartKindRon> for PartKind {
             } => Self::Parachute(ParachuteSpec {
                 deployed_drag_area_m2,
             }),
+            PartKindRon::HeatShield {
+                ablator_kg,
+                wake_shield_factor,
+            } => Self::HeatShield(HeatShieldSpec {
+                ablator_kg,
+                wake_shield_factor,
+            }),
+            PartKindRon::LandingLeg {
+                impact_tolerance_m_s,
+            } => Self::LandingLeg(LandingLegSpec {
+                impact_tolerance_m_s,
+            }),
+            PartKindRon::NoseCone { drag_reduction } => {
+                Self::NoseCone(NoseConeSpec { drag_reduction })
+            }
         }
     }
 }
@@ -268,6 +371,7 @@ impl AssetLoader for PartRonLoader {
         let spec = PartSpec {
             id: parsed.id,
             display_name: parsed.display_name,
+            category: parsed.category.into(),
             dry_mass_kg: parsed.dry_mass_kg,
             shape: parsed.shape.into(),
             kind: parsed.kind.into(),
@@ -276,6 +380,7 @@ impl AssetLoader for PartRonLoader {
             radial_attach: parsed.radial_attach,
             drag_coeff: parsed.drag_coeff,
             max_impact_m_s: parsed.max_impact_m_s,
+            max_temp_k: parsed.max_temp_k,
         };
         let style = PartVisualStyle {
             base_color: parsed.base_color,
@@ -290,10 +395,44 @@ impl AssetLoader for PartRonLoader {
     }
 }
 
-fn load_part_ron_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let handles = PART_ASSET_PATHS
+fn discover_part_asset_paths() -> Vec<String> {
+    let mut dirs: Vec<PathBuf> = vec![
+        PathBuf::from("assets/parts"),
+        PathBuf::from("crates/kepler_app/assets/parts"),
+    ];
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        dirs.push(Path::new(manifest_dir).join("assets").join("parts"));
+    }
+
+    for dir in dirs {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut found = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|s| s.to_str())
+                    && name.ends_with(".part.ron")
+                {
+                    found.push(format!("parts/{name}"));
+                }
+            }
+            if !found.is_empty() {
+                found.sort();
+                return found;
+            }
+        }
+    }
+
+    FALLBACK_PART_ASSET_PATHS
         .iter()
-        .map(|path| asset_server.load::<PartSpecAsset>(*path))
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
+fn load_part_ron_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let paths = discover_part_asset_paths();
+    let handles = paths
+        .into_iter()
+        .map(|path| asset_server.load::<PartSpecAsset>(path))
         .collect();
     commands.insert_resource(LoadedPartHandles { handles });
 }
