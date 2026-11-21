@@ -1,0 +1,15 @@
+PartSpecRon(
+    id: "decoupler_stack",
+    display_name: "TR-16 Stack Decoupler",
+    dry_mass_kg: 80.0,
+    shape: RoundedRect(width: 1.35, height: 0.36, corner_radius: 0.04),
+    kind: Decoupler(ejection_impulse_ns: 280.0, crossfeed: false),
+    stack_top: true,
+    stack_bottom: true,
+    radial_attach: false,
+    drag_coeff: 0.30,
+    max_impact_m_s: 14.0,
+    base_color: (0.36, 0.39, 0.44, 1.0),
+    accent_color: (1.00, 0.80, 0.18, 1.0),
+    emissive_strength: 1.7,
+)

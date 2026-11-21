@@ -1,0 +1,15 @@
+PartSpecRon(
+    id: "engine_booster",
+    display_name: "LV-110 'Titan'",
+    dry_mass_kg: 650.0,
+    shape: Nozzle(mount_width: 1.55, throat_width: 0.68, bell_width: 1.38, height: 1.45),
+    kind: Engine(max_thrust_n: 110000.0, isp_s: 295.0, gimbal_range_rad: 0.06),
+    stack_top: true,
+    stack_bottom: false,
+    radial_attach: false,
+    drag_coeff: 0.45,
+    max_impact_m_s: 10.0,
+    base_color: (0.22, 0.24, 0.29, 1.0),
+    accent_color: (1.00, 0.48, 0.12, 1.0),
+    emissive_strength: 2.2,
+)
