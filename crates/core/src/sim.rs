@@ -1,7 +1,7 @@
 //! @file sim.rs
 //!
-//! @version 1.2.0
-//! @author `BleckWolf25`
+//! @version 1.5.1
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Full N-body symplectic simulator with ablative shielding, rotational contacts, and transfers
@@ -9,23 +9,25 @@
 //! @description
 //! Implements `SimWorld` with fixed 1/120 s symplectic Velocity Verlet substeps under thrust,
 //! atmospheric flight, or contact, adaptive coast steps during time warp, barycentric Kepler Prime
-//! and Selene gravitation, aerodynamic fin lift and nosecone drag reduction, convective reentry
+//! and Moon gravitation, aerodynamic fin lift and nosecone drag reduction, convective reentry
 //! heating with ablator burnoff and lateral wake occlusion, rotational rigid-body surface contacts
 //! with part-level impact breakup, and trajectory + maneuver transfer prediction.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
-
-use crate::body::{CelestialBody, OrbitElements, dominant_body, dominant_body_elements};
+use crate::body::{
+    CelestialBody, CelestialCatalog, OrbitElements, dominant_body, dominant_body_elements,
+};
 use crate::math::{DVec2, GRAV_CONSTANT, TAU_F64};
 use crate::parts::{PartKind, VesselBlueprint};
 use crate::vessel::{AMBIENT_TEMP_K, SasMode, SimError, StagingOutcome, Vessel, VesselId};
 use std::collections::HashMap;
 
 // ---------- CONSTANTS
-
 /// Nominal fixed physics substep duration (1/120 s).
 pub const FIXED_SUBSTEP_DT: f64 = 1.0 / 120.0;
 
@@ -129,7 +131,6 @@ struct BodyPoint {
 }
 
 // ---------- DECLARATIONS / IMPLEMENTATION
-
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
@@ -170,7 +171,7 @@ impl SimWorld {
         }
     }
 
-    /// Creates a single-body launchpad sandbox around Kepler Prime (without Selene).
+    /// Creates a single-body launchpad sandbox around Kepler Prime (without the Moon).
     ///
     /// # Errors
     ///
@@ -191,7 +192,7 @@ impl SimWorld {
         Ok(world)
     }
 
-    /// Creates the barycentric two-body Kepler system (Kepler Prime + Moon Selene) with
+    /// Creates the barycentric two-body Kepler system (Kepler Prime + Moon) with
     /// the vessel placed upright on Kepler Prime's launchpad.
     ///
     /// # Errors
@@ -202,12 +203,40 @@ impl SimWorld {
         catalog: &crate::parts::PartCatalog,
     ) -> Result<Self, SimError> {
         let mut world = Self::new();
-        let [planet, moon] = CelestialBody::kepler_selene_system();
+        let catalog_bodies = CelestialCatalog::kepler_moon().build_system();
+        let [planet, moon]: [CelestialBody; 2] = catalog_bodies
+            .try_into()
+            .map_err(|_| SimError::EmptyBlueprint)?;
         let mut vessel = Vessel::from_blueprint(world.next_vessel_id, bp, catalog)?;
         world.next_vessel_id += 1;
         vessel.place_on_north_pole_with_vel(planet.pos, planet.vel, planet.radius_m);
         let active_id = vessel.id;
         world.bodies.push(planet);
+        world.bodies.push(moon);
+        world.vessels.push(vessel);
+        world.active_vessel_id = Some(active_id);
+        Ok(world)
+    }
+
+    /// Creates the Earth-Moon system with the vessel placed upright on Earth's north pole.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError`] if the blueprint cannot be assembled into a valid vessel.
+    pub fn with_earth_moon_vessel(
+        bp: &VesselBlueprint,
+        catalog: &crate::parts::PartCatalog,
+    ) -> Result<Self, SimError> {
+        let mut world = Self::new();
+        let catalog_bodies = CelestialCatalog::earth_moon().build_system();
+        let [earth, moon]: [CelestialBody; 2] = catalog_bodies
+            .try_into()
+            .map_err(|_| SimError::EmptyBlueprint)?;
+        let mut vessel = Vessel::from_blueprint(world.next_vessel_id, bp, catalog)?;
+        world.next_vessel_id += 1;
+        vessel.place_on_north_pole_with_vel(earth.pos, earth.vel, earth.radius_m);
+        let active_id = vessel.id;
+        world.bodies.push(earth);
         world.bodies.push(moon);
         world.vessels.push(vessel);
         world.active_vessel_id = Some(active_id);
@@ -379,7 +408,8 @@ impl SimWorld {
         for (vessel, target) in self.vessels.iter_mut().zip(target_angles) {
             if !vessel.crashed {
                 vessel.control.sas_target_angle = target;
-                vessel.prepare_step_throttles(dt);
+                let pressure_pa = ambient_pressure_at(vessel.pos, &self.bodies);
+                vessel.prepare_step_throttles_at_pressure(dt, pressure_pa);
             }
         }
 
@@ -409,7 +439,8 @@ impl SimWorld {
             vessel.pos += vh * dt;
             vessel.angle += wh * dt;
             vessel.wrap_angle();
-            vessel.consume_propellant(dt);
+            let pressure_pa = ambient_pressure_at(vessel.pos, &self.bodies);
+            vessel.consume_propellant_at_pressure(dt, pressure_pa);
 
             vessel_velocity_halfstep.push(vh);
             vessel_angular_velocity_halfstep.push(wh);
@@ -533,7 +564,7 @@ impl SimWorld {
     }
 
     /// Predicts both the current coast trajectory and an optional impulsive maneuver transfer trajectory,
-    /// including Selene encounter / closest-approach diagnostics, maneuver node location, and ghost moon positions.
+    /// including Moon encounter / closest-approach diagnostics, maneuver node location, and ghost moon positions.
     #[must_use]
     pub fn predict_trajectory_with_plan(
         &self,
@@ -843,7 +874,9 @@ impl SimWorld {
             if vessel.crashed {
                 continue;
             }
-            let (mut force, mut torque) = vessel.compute_thrust_and_control_wrench();
+            let pressure_pa = ambient_pressure_at(vessel.pos, &self.bodies);
+            let (mut force, mut torque) =
+                vessel.compute_thrust_and_control_wrench_at_pressure(pressure_pa);
 
             if self.config.atmosphere_drag {
                 let (aero_f, aero_t) = compute_vessel_aerodynamics(vessel, &self.bodies);
@@ -872,6 +905,8 @@ impl SimWorld {
             let mut max_rho = 0.0;
             let mut rel_vel = DVec2::ZERO;
             let mut min_alt = f64::INFINITY;
+            let mut descending = false;
+            let mut ambient_temperature_k = AMBIENT_TEMP_K;
 
             for body in &self.bodies {
                 let alt = vessel.pos.distance(body.pos) - body.radius_m;
@@ -881,6 +916,12 @@ impl SimWorld {
                     if rho > max_rho {
                         max_rho = rho;
                         rel_vel = vessel.vel - body.vel;
+                        let surface_normal = (vessel.pos - body.pos).normalize_or_zero();
+                        descending = rel_vel.dot(surface_normal) < 0.0;
+                        let state = atmo.state_at(alt);
+                        if state.temperature_k > 0.0 {
+                            ambient_temperature_k = state.temperature_k;
+                        }
                     }
                 }
             }
@@ -894,6 +935,7 @@ impl SimWorld {
                     && min_alt <= 5_500.0
                     && speed <= 320.0
                     && max_rho > 0.01
+                    && descending
                 {
                     part.chute_deployed = true;
                     events.push(SimStepEvent::ChuteDeployed {
@@ -939,7 +981,7 @@ impl SimWorld {
                 })
                 .collect();
 
-            let base_flux = if max_rho > 0.0 && speed > 450.0 {
+            let base_flux = if descending && max_rho > 0.0 && speed > 450.0 {
                 REENTRY_HEAT_COEFF * max_rho.sqrt() * speed.powi(3)
             } else {
                 0.0
@@ -980,11 +1022,11 @@ impl SimWorld {
 
                 let thermal_mass = (part.spec.dry_mass_kg * 28.0).max(1_200.0);
                 let q_cool = RADIATIVE_COOL_COEFF
-                    * (part.temperature_k.powi(4) - AMBIENT_TEMP_K.powi(4))
+                    * (part.temperature_k.powi(4) - ambient_temperature_k.powi(4))
                     * (size.x + size.y);
                 let net_q = q_in - q_cool;
                 part.temperature_k =
-                    (part.temperature_k + (net_q / thermal_mass) * dt).max(AMBIENT_TEMP_K);
+                    (part.temperature_k + (net_q / thermal_mass) * dt).max(ambient_temperature_k);
             }
 
             let was_crashed = vessel.crashed;
@@ -1171,6 +1213,19 @@ fn compute_coast_accelerations(bodies: &[BodyPoint], v_pos: DVec2) -> (Vec<DVec2
     (b_acc, v_acc)
 }
 
+/// Returns the strongest nearby body's ideal-gas surface pressure at the vessel position.
+fn ambient_pressure_at(position: DVec2, bodies: &[CelestialBody]) -> f64 {
+    bodies
+        .iter()
+        .filter_map(|body| {
+            let atmosphere = body.atmosphere?;
+            let altitude_m = position.distance(body.pos) - body.radius_m;
+            let state = atmosphere.state_at(altitude_m);
+            (state.density_kg_m3 > 0.0).then_some(state.pressure_pa)
+        })
+        .fold(0.0, f64::max)
+}
+
 /// Computes exponential atmospheric drag, nosecone drag relief, fin lift, and parachute drag.
 fn compute_vessel_aerodynamics(vessel: &Vessel, bodies: &[CelestialBody]) -> (DVec2, f64) {
     let mut aero_force = DVec2::ZERO;
@@ -1257,6 +1312,20 @@ mod tests {
     use crate::math::{G0, SplitMix64};
     use crate::parts::{AttachKind, default_part_catalog, starter_two_stage_blueprint};
 
+    fn propagate_circular_orbit(mu: f64, radius_m: f64, dt_s: f64, steps: usize) -> DVec2 {
+        let mut pos = DVec2::new(radius_m, 0.0);
+        let mut vel = DVec2::new(0.0, (mu / radius_m).sqrt());
+        for _ in 0..steps {
+            let r_sq = pos.length_squared().max(1.0);
+            let acceleration = pos * (-mu / (r_sq * r_sq.sqrt()));
+            pos += vel * dt_s + acceleration * (0.5 * dt_s * dt_s);
+            let next_r_sq = pos.length_squared().max(1.0);
+            let next_acceleration = pos * (-mu / (next_r_sq * next_r_sq.sqrt()));
+            vel += (acceleration + next_acceleration) * (0.5 * dt_s);
+        }
+        pos
+    }
+
     #[test]
     fn golden_elliptical_orbit_conserves_energy_and_angular_momentum() {
         let planet = CelestialBody::kepler_prime();
@@ -1312,7 +1381,7 @@ mod tests {
     fn three_body_mutual_gravity_conserves_energy_and_momenta() {
         let mut world = SimWorld::new();
         let planet = CelestialBody::kepler_prime();
-        let moon = CelestialBody::selene(&planet);
+        let moon = CelestialBody::moon(&planet);
 
         let cat = default_part_catalog();
         let bp = starter_two_stage_blueprint(&cat);
@@ -1466,7 +1535,7 @@ mod tests {
 
     #[test]
     fn trajectory_prediction_continues_after_long_lead_maneuver() {
-        let [planet, moon] = CelestialBody::kepler_selene_system();
+        let [planet, moon] = CelestialBody::kepler_moon_system();
         let r_p = planet.radius_m + 100_000.0;
         let v_p = (planet.mu() / r_p).sqrt();
 
@@ -1750,6 +1819,94 @@ mod tests {
         assert!(
             v.parts.len() < 3,
             "expected lower engine part to break on impact"
+        );
+    }
+
+    #[test]
+    fn heat_does_not_increase_without_atmospheric_density() {
+        let cat = default_part_catalog();
+        let mut bp = VesselBlueprint::new("VacuumProbe");
+        let pod = bp.add_root("command_pod", 0);
+        bp.attach_child(
+            pod,
+            "heat_shield",
+            AttachKind::StackBottom,
+            DVec2::new(0.0, -0.72),
+            0.0,
+            0,
+        );
+
+        let planet = CelestialBody::kepler_prime();
+        let mut vessel = Vessel::from_blueprint(1, &bp, &cat).expect("valid vacuum probe");
+        vessel.pos = DVec2::new(0.0, planet.radius_m + 500_000.0);
+        vessel.vel = DVec2::new(4_000.0, 0.0);
+
+        let init_ablator = vessel.total_ablator_kg();
+        let mut world = SimWorld::new();
+        world.bodies.push(planet);
+        world.vessels.push(vessel);
+        world.active_vessel_id = Some(1);
+
+        for _ in 0..240 {
+            world.step(1.0 / 120.0);
+        }
+
+        let vessel = world.active_vessel().expect("vacuum probe");
+        assert_eq!(vessel.total_ablator_kg(), init_ablator);
+        assert!(vessel.peak_temperature_k() <= AMBIENT_TEMP_K + 1.0);
+        assert!(vessel.peak_heat_flux() <= 1.0e-6);
+    }
+
+    #[test]
+    fn heat_does_not_increase_during_atmospheric_ascent() {
+        let cat = default_part_catalog();
+        let mut bp = VesselBlueprint::new("AscentProbe");
+        bp.add_root("probe_core", 0);
+
+        let planet = CelestialBody::kepler_prime();
+        let mut vessel = Vessel::from_blueprint(1, &bp, &cat).expect("valid ascent probe");
+        vessel.pos = DVec2::new(0.0, planet.radius_m + 50_000.0);
+        vessel.vel = DVec2::new(495.0, 700.0);
+        vessel.landed = false;
+
+        let mut world = SimWorld::new();
+        world.bodies.push(planet);
+        world.vessels.push(vessel);
+        world.active_vessel_id = Some(1);
+
+        for _ in 0..240 {
+            world.step(1.0 / 120.0);
+        }
+
+        let vessel = world.active_vessel().expect("ascent probe");
+        assert!(vessel.peak_heat_flux() <= 1.0e-6);
+        assert!(vessel.peak_temperature_k() <= AMBIENT_TEMP_K + 1.0);
+    }
+
+    #[test]
+    fn fixed_120_hz_substep_matches_finer_reference_circular_orbit() {
+        let earth = CelestialBody::earth();
+        let radius_m = earth.radius_m + 300_000.0;
+        let mu = earth.mu();
+        let period_s = TAU_F64 * (radius_m.powi(3) / mu).sqrt();
+
+        let steps_120 = ((period_s / FIXED_SUBSTEP_DT).round()) as usize;
+        let steps_240 = ((period_s / (0.5 * FIXED_SUBSTEP_DT)).round()) as usize;
+        let at_120 = propagate_circular_orbit(mu, radius_m, FIXED_SUBSTEP_DT, steps_120);
+        let at_240 = propagate_circular_orbit(mu, radius_m, 0.5 * FIXED_SUBSTEP_DT, steps_240);
+        let reference_error_m = at_240.distance(DVec2::new(radius_m, 0.0));
+        let coarse_error_m = at_120.distance(DVec2::new(radius_m, 0.0));
+        assert!(
+            reference_error_m < 100.0,
+            "reference error {reference_error_m:.3} m"
+        );
+        assert!(
+            coarse_error_m < 1_000.0,
+            "120 Hz error {coarse_error_m:.3} m"
+        );
+        assert!(
+            (coarse_error_m - reference_error_m).abs() < 1.0,
+            "120 Hz={coarse_error_m:.3} m, 240 Hz={reference_error_m:.3} m"
         );
     }
 }

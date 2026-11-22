@@ -1,7 +1,7 @@
 //! @file flight.rs
 //!
-//! @version 1.3.1
-//! @author `BleckWolf25`
+//! @version 1.8.1
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Flight simulation coordinator with SFS part shaders, throat glow, FX, HUD, and save/load
@@ -13,7 +13,9 @@
 //! parallax starfield/launchpad FX, and the 2D Navball HUD.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -23,8 +25,9 @@ use crate::flight_fx::{
     update_environment_and_particles,
 };
 use crate::flight_hud::{
-    FlightMapBadge, HudSyncQueries, draw_navball_gizmo, spawn_flight_hud_ui,
-    style_flight_buttons_on_change, style_flight_buttons_on_release, update_flight_hud_and_badges,
+    FlightMapBadge, FlightMissionFeedbackText, HudSyncQueries, draw_navball_gizmo,
+    spawn_flight_hud_ui, style_flight_buttons_on_change, style_flight_buttons_on_release,
+    update_flight_hud_and_badges,
 };
 use crate::procedural_mesh::{
     build_deployed_chute_mesh, build_part_mesh, build_plume_quad, build_reentry_quad,
@@ -32,9 +35,9 @@ use crate::procedural_mesh::{
 use crate::save_io::{load_quicksave, save_quicksave};
 use crate::shaders::{AtmosphereMaterial, PartMaterial, PlumeMaterial, ReentryMaterial};
 use crate::state::{
-    ActiveBlueprint, AudioCue, AudioCueQueue, CameraFocusState, CameraFocusTarget, FlightClock,
-    FloatingOrigin, GameMode, LivePartCatalog, PHYSICAL_WARP_MAX_INDEX, TIME_WARP_LEVELS,
-    part_style_id, world_to_render_vec2,
+    ActiveBlueprint, ActiveLaunchSystem, AudioCue, AudioCueQueue, CameraFocusState,
+    CameraFocusTarget, FlightClock, FloatingOrigin, GameMode, LivePartCatalog,
+    PHYSICAL_WARP_MAX_INDEX, TIME_WARP_LEVELS, part_style_id, world_to_render_vec2,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -48,6 +51,8 @@ use std::collections::{HashMap, HashSet};
 // ---------- CONSTANTS
 
 const PREDICTION_REFRESH_FRAMES: u32 = 4;
+const ATMOSPHERIC_RADIAL_THRESHOLD_M_S: f64 = 25.0;
+const STABLE_ORBIT_ECCENTRICITY: f64 = 0.08;
 
 // ---------- TYPES
 
@@ -71,6 +76,10 @@ pub struct FlightSimState {
     pub max_altitude_m: f64,
     pub max_speed_m_s: f64,
     pub max_temp_k: f64,
+    pub mission_elapsed_s: f64,
+    pub mission_phase: u8,
+    pub mission_feedback: String,
+    pub mission_feedback_timer_s: f64,
     pub staging_count: u32,
     pub stage_requested: bool,
     pub throttle_override: Option<f64>,
@@ -239,6 +248,7 @@ struct FlightStepContext<'w> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     active_bp: Res<'w, ActiveBlueprint>,
     catalog: Res<'w, LivePartCatalog>,
+    launch_system: Res<'w, ActiveLaunchSystem>,
     clock: ResMut<'w, FlightClock>,
     origin: ResMut<'w, FloatingOrigin>,
     focus: ResMut<'w, CameraFocusState>,
@@ -256,12 +266,14 @@ type BadgeQuery<'w, 's> = Query<
         &'static mut TextColor,
     ),
     (
+        With<FlightMapBadge>,
         Without<crate::flight_hud::FlightHudText>,
         Without<crate::flight_hud::FlightNavText>,
         Without<crate::flight_hud::PauseSummaryText>,
         Without<crate::flight_hud::FlightPauseModal>,
         Without<crate::flight_hud::FlightControlsText>,
         Without<crate::flight_hud::RecoverButtonMarker>,
+        Without<FlightMissionFeedbackText>,
     ),
 >;
 
@@ -269,10 +281,64 @@ pub struct FlightPlugin;
 
 // ---------- DECLARATIONS / IMPLEMENTATION
 
+fn mission_phase_from_state(
+    landed: bool,
+    altitude_m: f64,
+    atmosphere_top_m: Option<f64>,
+    radial_m_s: f64,
+    bound: bool,
+    eccentricity: f64,
+    periapsis_alt_m: f64,
+    apoapsis_alt_m: f64,
+    previous_phase: u8,
+) -> u8 {
+    if landed {
+        return 5;
+    }
+
+    let Some(atmosphere_top_m) = atmosphere_top_m else {
+        return if bound && eccentricity < STABLE_ORBIT_ECCENTRICITY {
+            2
+        } else {
+            previous_phase
+        };
+    };
+
+    if bound
+        && eccentricity < STABLE_ORBIT_ECCENTRICITY
+        && periapsis_alt_m > atmosphere_top_m
+        && apoapsis_alt_m > atmosphere_top_m
+    {
+        return 2;
+    }
+
+    if altitude_m <= atmosphere_top_m {
+        if radial_m_s > ATMOSPHERIC_RADIAL_THRESHOLD_M_S {
+            return 1;
+        }
+        if radial_m_s < -ATMOSPHERIC_RADIAL_THRESHOLD_M_S {
+            return 4;
+        }
+        if previous_phase == 1 || previous_phase == 4 {
+            return previous_phase;
+        }
+        return 0;
+    }
+
+    if radial_m_s > ATMOSPHERIC_RADIAL_THRESHOLD_M_S {
+        3
+    } else if radial_m_s < -ATMOSPHERIC_RADIAL_THRESHOLD_M_S {
+        4
+    } else {
+        previous_phase
+    }
+}
+
 fn enter_flight(
     mut commands: Commands<'_, '_>,
     active_bp: Res<'_, ActiveBlueprint>,
     catalog: Res<'_, LivePartCatalog>,
+    launch_system: Res<'_, ActiveLaunchSystem>,
     mut clock: ResMut<'_, FlightClock>,
     mut origin: ResMut<'_, FloatingOrigin>,
     mut assets: FlightAssets<'_>,
@@ -281,14 +347,21 @@ fn enter_flight(
     clock.paused = false;
     clock.physical_capped = true;
 
-    let world =
-        match SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog) {
-            Ok(w) => w,
-            Err(err) => {
-                error!("Failed to initialize flight simulation: {err}");
-                SimWorld::new()
-            }
-        };
+    let world = match *launch_system {
+        ActiveLaunchSystem::EarthMoon => {
+            SimWorld::with_earth_moon_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+        }
+        ActiveLaunchSystem::KeplerMoon => {
+            SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+        }
+    };
+    let world = match world {
+        Ok(w) => w,
+        Err(err) => {
+            error!("Failed to initialize flight simulation: {err}");
+            SimWorld::new()
+        }
+    };
 
     if let Some(active) = world.active_vessel() {
         origin.origin_m = active.pos;
@@ -301,9 +374,9 @@ fn enter_flight(
     }
     spawn_flight_hud_ui(&mut commands);
 
-    let pred = world
-        .active_vessel_id
-        .map_or_default(|id| world.predict_trajectory_with_plan(id, PredictionOptions::default(), None));
+    let pred = world.active_vessel_id.map_or_default(|id| {
+        world.predict_trajectory_with_plan(id, PredictionOptions::default(), None)
+    });
 
     commands.insert_resource(FlightSimState {
         world,
@@ -314,7 +387,7 @@ fn enter_flight(
         maneuver: ManeuverPlan::default(),
         transfer_est: None,
         last_prediction: pred,
-        status_banner: String::from("Ready on Kepler Prime launchpad."),
+        status_banner: format!("Ready on {} launchpad.", launch_system.label()),
         pause_menu_open: false,
         recovered_summary: false,
         show_controls_help: false,
@@ -323,6 +396,10 @@ fn enter_flight(
         max_altitude_m: 0.0,
         max_speed_m_s: 0.0,
         max_temp_k: 293.15,
+        mission_elapsed_s: 0.0,
+        mission_phase: 5,
+        mission_feedback: String::from("Launch ready"),
+        mission_feedback_timer_s: 5.0,
         staging_count: 0,
         stage_requested: false,
         throttle_override: None,
@@ -546,15 +623,22 @@ fn step_flight_controls_and_physics(
     let keys = &ctx.keys;
     let active_bp = &ctx.active_bp;
     let catalog = &ctx.catalog;
+    let launch_system = &ctx.launch_system;
     let clock = &mut ctx.clock;
     let origin = &mut ctx.origin;
     let focus = &mut ctx.focus;
 
     if flight.request_revert_pad {
         flight.request_revert_pad = false;
-        if let Ok(new_world) =
-            SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
-        {
+        let new_world = match **launch_system {
+            ActiveLaunchSystem::EarthMoon => {
+                SimWorld::with_earth_moon_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+            }
+            ActiveLaunchSystem::KeplerMoon => {
+                SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+            }
+        };
+        if let Ok(new_world) = new_world {
             flight.world = new_world;
             flight.throttle = 1.0;
             flight.sas_enabled = true;
@@ -565,6 +649,10 @@ fn step_flight_controls_and_physics(
             flight.max_altitude_m = 0.0;
             flight.max_speed_m_s = 0.0;
             flight.max_temp_k = 293.15;
+            flight.mission_elapsed_s = 0.0;
+            flight.mission_phase = 5;
+            flight.mission_feedback = String::from("Reverted to launchpad");
+            flight.mission_feedback_timer_s = 5.0;
             flight.staging_count = 0;
             flight.needs_visual_rebuild = true;
             flight.status_banner = String::from("Reverted to launchpad.");
@@ -656,12 +744,33 @@ fn step_flight_controls_and_physics(
         clock.paused = !clock.paused;
     }
 
-    if keys.just_pressed(KeyCode::KeyG)
-        && let Some(active) = flight.world.active_vessel_mut()
-    {
-        let armed = active.arm_all_parachutes();
-        if armed > 0 {
-            flight.status_banner = format!("Armed {armed} parachute(s) (< 5.5 km & 320 m/s).");
+    if keys.just_pressed(KeyCode::KeyG) {
+        let safety = flight.world.active_vessel().and_then(|active| {
+            flight.world.bodies.iter().find_map(|body| {
+                let altitude_m = active.pos.distance(body.pos) - body.radius_m;
+                let atmosphere = body.atmosphere?;
+                let density = atmosphere.density_at(altitude_m);
+                let rel_vel = active.vel - body.vel;
+                let outward = (active.pos - body.pos).normalize_or_zero().dot(rel_vel);
+                (density > 0.01).then_some((altitude_m, rel_vel.length(), outward))
+            })
+        });
+        if let Some((altitude_m, speed_m_s, outward_m_s)) = safety
+            && altitude_m <= 5_500.0
+            && speed_m_s <= 320.0
+            && outward_m_s < 0.0
+        {
+            if let Some(active) = flight.world.active_vessel_mut() {
+                let armed = active.arm_all_parachutes();
+                if armed > 0 {
+                    flight.status_banner =
+                        format!("Armed {armed} parachute(s) (< 5.5 km & 320 m/s).");
+                }
+            }
+        } else {
+            flight.status_banner = String::from(
+                "Chutes require dense atmosphere, descending flight, < 5.5 km, and < 320 m/s.",
+            );
         }
     }
 
@@ -675,7 +784,7 @@ fn step_flight_controls_and_physics(
             prograde_dv_m_s: est.dv1_m_s,
             radial_dv_m_s: 0.0,
         };
-        flight.status_banner = String::from("Planned Hohmann TLI maneuver to Selene.");
+        flight.status_banner = String::from("Planned Hohmann TLI maneuver to Moon.");
     }
     if keys.just_pressed(KeyCode::KeyV) {
         flight.maneuver.enabled = false;
@@ -871,6 +980,13 @@ fn step_flight_controls_and_physics(
         if flight.maneuver.enabled {
             flight.maneuver.lead_time_s = (flight.maneuver.lead_time_s - sim_dt).max(0.0);
         }
+        let vessel_active = flight
+            .world
+            .active_vessel()
+            .is_some_and(|v| !v.landed && !v.crashed && v.vel.length_squared() > 0.25);
+        if vessel_active {
+            flight.mission_elapsed_s += sim_dt;
+        }
     }
 
     if let Some((v_id, peak_t)) = flight
@@ -885,23 +1001,89 @@ fn step_flight_controls_and_physics(
         }
     }
 
-    flight.transfer_est = flight
-        .world
-        .active_vessel()
-        .and_then(|v| compute_hohmann_transfer(&flight.world.bodies, v.pos, v.vel, 1));
+    if let Some(vessel) = flight.world.active_vessel() {
+        let elements = flight
+            .world
+            .active_vessel_id
+            .and_then(|id| flight.world.vessel_orbit_elements(id));
+        let nearest_atmosphere = flight
+            .world
+            .bodies
+            .iter()
+            .filter_map(|body| {
+                let atmosphere = body.atmosphere?;
+                let altitude_m = vessel.pos.distance(body.pos) - body.radius_m;
+                let relative_velocity = vessel.vel - body.vel;
+                let radial_m_s = (vessel.pos - body.pos)
+                    .normalize_or_zero()
+                    .dot(relative_velocity);
+                Some((altitude_m, atmosphere.max_altitude_m, radial_m_s))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+
+        let phase = if let Some((altitude_m, top_m, radial_m_s)) = nearest_atmosphere {
+            mission_phase_from_state(
+                vessel.landed,
+                altitude_m,
+                Some(top_m),
+                radial_m_s,
+                elements.is_some_and(|e| e.bound),
+                elements.map_or(1.0, |e| e.eccentricity),
+                elements.map_or(f64::NEG_INFINITY, |e| e.periapsis_alt_m),
+                elements.map_or(f64::NEG_INFINITY, |e| e.apoapsis_alt_m),
+                flight.mission_phase,
+            )
+        } else {
+            mission_phase_from_state(
+                vessel.landed,
+                0.0,
+                None,
+                vessel.vel.length(),
+                elements.is_some_and(|e| e.bound),
+                elements.map_or(1.0, |e| e.eccentricity),
+                elements.map_or(f64::NEG_INFINITY, |e| e.periapsis_alt_m),
+                elements.map_or(f64::NEG_INFINITY, |e| e.apoapsis_alt_m),
+                flight.mission_phase,
+            )
+        };
+        if phase != flight.mission_phase {
+            let message = match phase {
+                1 => "Atmospheric ascent",
+                2 => "Stable orbit achieved",
+                3 => "Leaving atmosphere",
+                4 => "Atmospheric entry",
+                5 => "Touchdown",
+                _ => "Launchpad",
+            };
+            flight.mission_feedback = String::from(message);
+            flight.mission_feedback_timer_s = 5.0;
+            flight.mission_phase = phase;
+        }
+    }
+    if flight.mission_feedback_timer_s > 0.0 {
+        flight.mission_feedback_timer_s = (flight.mission_feedback_timer_s - dt_real).max(0.0);
+        if flight.mission_feedback_timer_s == 0.0 {
+            flight.mission_feedback.clear();
+        }
+    }
+
+    flight.transfer_est = flight.world.active_vessel().and_then(|v| {
+        if v.landed || v.crashed || v.vel.length_squared() <= 0.25 {
+            None
+        } else {
+            compute_hohmann_transfer(&flight.world.bodies, v.pos, v.vel, 1)
+        }
+    });
 
     flight.pred_tick += 1;
     if flight.pred_tick >= PREDICTION_REFRESH_FRAMES || flight.maneuver.enabled {
         flight.pred_tick = 0;
         let plan_opt = flight.maneuver.enabled.then_some(flight.maneuver);
-        flight.last_prediction = flight
-            .world
-            .active_vessel_id
-            .map_or_default(|id| {
-                flight
-                    .world
-                    .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
-            });
+        flight.last_prediction = flight.world.active_vessel_id.map_or_default(|id| {
+            flight
+                .world
+                .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
+        });
     }
 }
 
@@ -1281,3 +1463,69 @@ impl Plugin for FlightPlugin {
 }
 
 // ---------- EXPORTS
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn low_altitude_ascent_is_never_leaving_atmosphere() {
+        let phase = mission_phase_from_state(
+            false,
+            9_000.0,
+            Some(100_000.0),
+            700.0,
+            false,
+            1.0,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            5,
+        );
+        assert_eq!(phase, 1);
+    }
+
+    #[test]
+    fn atmospheric_descent_requires_inward_velocity() {
+        let phase = mission_phase_from_state(
+            false,
+            9_000.0,
+            Some(100_000.0),
+            -700.0,
+            false,
+            1.0,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            1,
+        );
+        assert_eq!(phase, 4);
+    }
+
+    #[test]
+    fn leaving_atmosphere_requires_crossing_the_top() {
+        let phase = mission_phase_from_state(
+            false,
+            101_000.0,
+            Some(100_000.0),
+            700.0,
+            false,
+            1.0,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            1,
+        );
+        assert_eq!(phase, 3);
+
+        let still_in_atmosphere = mission_phase_from_state(
+            false,
+            99_000.0,
+            Some(100_000.0),
+            700.0,
+            false,
+            1.0,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            1,
+        );
+        assert_eq!(still_in_atmosphere, 1);
+    }
+}

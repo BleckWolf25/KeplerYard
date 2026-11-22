@@ -1,7 +1,7 @@
 //! @file save.rs
 //!
-//! @version 1.3.0
-//! @author `BleckWolf25`
+//! @version 1.4.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Bit-exact binary serialization and deserialization for `SimWorld` and `VesselBlueprint`
@@ -12,7 +12,9 @@
 //! `f64` bit patterns with zero external serialization crates in `core`.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -29,8 +31,8 @@ use core::fmt;
 
 // ---------- CONSTANTS
 
-const MAGIC_WORLD: &[u8; 8] = b"KYWORLD3";
-const MAGIC_BLUEPRINT: &[u8; 8] = b"KYCRAFT3";
+const MAGIC_WORLD: &[u8; 8] = b"KYWORLD4";
+const MAGIC_BLUEPRINT: &[u8; 8] = b"KYCRAFT4";
 
 // ---------- TYPES
 
@@ -250,6 +252,16 @@ fn write_u8(out: &mut Vec<u8>, v: u8) {
 
 fn write_bool(out: &mut Vec<u8>, v: bool) {
     out.push(u8::from(v));
+}
+
+fn write_optional_f64(out: &mut Vec<u8>, v: Option<f64>) {
+    match v {
+        Some(value) => {
+            write_bool(out, true);
+            write_f64(out, value);
+        }
+        None => write_bool(out, false),
+    }
 }
 
 fn write_u32(out: &mut Vec<u8>, v: u32) {
@@ -506,6 +518,9 @@ fn write_part_spec(out: &mut Vec<u8>, s: &PartSpec) {
             write_f64(out, e.max_thrust_n);
             write_f64(out, e.isp_s);
             write_f64(out, e.gimbal_range_rad);
+            write_optional_f64(out, e.sea_level_thrust_n);
+            write_optional_f64(out, e.sea_level_isp_s);
+            write_optional_f64(out, e.vacuum_isp_s);
         }
         PartKind::Decoupler(d) => {
             write_u8(out, 3);
@@ -620,6 +635,9 @@ fn read_part_spec(r: &mut Reader<'_>) -> Result<PartSpec, SaveError> {
             max_thrust_n: r.read_f64()?,
             isp_s: r.read_f64()?,
             gimbal_range_rad: r.read_f64()?,
+            sea_level_thrust_n: r.read_opt_f64()?,
+            sea_level_isp_s: r.read_opt_f64()?,
+            vacuum_isp_s: r.read_opt_f64()?,
         }),
         3 => PartKind::Decoupler(DecouplerSpec {
             ejection_impulse_ns: r.read_f64()?,

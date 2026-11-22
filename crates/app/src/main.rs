@@ -1,7 +1,7 @@
 //! @file main.rs
 //!
-//! @version 1.2.1
-//! @author `BleckWolf25`
+//! @version 1.4.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Application entrypoint and Bevy plugin wiring for Kepler Yard
@@ -12,17 +12,14 @@
 //! categorized freeform VAB editor, and full cislunar N-body flight.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
-
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 // ---------- IMPORTS
-
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
-
-// ---------- CONSTANTS
-
-// ---------- TYPES
+use bevy::window::{MonitorSelection, WindowMode};
 
 // ---------- DECLARATIONS / IMPLEMENTATION
 
@@ -39,6 +36,18 @@ mod shaders;
 mod state;
 mod ui_kit;
 
+fn toggle_fullscreen(keys: Res<'_, ButtonInput<KeyCode>>, mut windows: Query<'_, '_, &mut Window>) {
+    if keys.just_pressed(KeyCode::F11)
+        && let Ok(mut window) = windows.single_mut()
+    {
+        window.mode = if matches!(window.mode, WindowMode::Windowed) {
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+        } else {
+            WindowMode::Windowed
+        };
+    }
+}
+
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.010, 0.015, 0.032)))
@@ -46,7 +55,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: String::from("Kepler Yard - Orbital Foundry"),
+                        title: String::from("Kepler Yard"),
                         resolution: WindowResolution::new(1520, 940),
                         ..default()
                     }),
@@ -68,6 +77,7 @@ fn main() {
             editor::EditorPlugin,
             flight::FlightPlugin,
         ))
+        .add_systems(Update, toggle_fullscreen)
         .run();
 }
 

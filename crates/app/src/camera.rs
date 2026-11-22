@@ -1,7 +1,7 @@
 //! @file camera.rs
 //!
-//! @version 1.2.1
-//! @author `BleckWolf25`
+//! @version 1.3.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Floating-origin 2D HDR bloom camera with UI hover blocking and normalized trackpad zoom
@@ -12,7 +12,9 @@
 //! zooming/panning when hovering interactive UI panels, and supports `Tab` focus cycling in flight.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -30,7 +32,7 @@ use bevy::prelude::*;
 const EDITOR_MIN_LOG_SCALE: f32 = -5.6;
 const EDITOR_MAX_LOG_SCALE: f32 = -1.1;
 const FLIGHT_MIN_LOG_SCALE: f32 = -5.4;
-const FLIGHT_MAX_LOG_SCALE: f32 = 10.6;
+const FLIGHT_MAX_LOG_SCALE: f32 = 19.8;
 
 // ---------- TYPES
 

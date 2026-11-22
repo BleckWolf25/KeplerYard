@@ -1,7 +1,7 @@
 //! @file state.rs
 //!
-//! @version 1.3.0
-//! @author `BleckWolf25`
+//! @version 1.4.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Shared game states, floating-origin resources, camera focus, shader style IDs, and warp
@@ -12,7 +12,9 @@
 //! archetype to its procedural shader detail profile.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -34,6 +36,23 @@ pub enum GameMode {
     #[default]
     Editor,
     Flight,
+}
+
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActiveLaunchSystem {
+    #[default]
+    EarthMoon,
+    KeplerMoon,
+}
+
+impl ActiveLaunchSystem {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::EarthMoon => "Earth-Moon",
+            Self::KeplerMoon => "Kepler Prime-Moon",
+        }
+    }
 }
 
 #[derive(Resource, Clone, Debug)]
@@ -269,6 +288,7 @@ impl Plugin for StatePlugin {
             .init_resource::<ActiveBlueprint>()
             .init_resource::<FloatingOrigin>()
             .init_resource::<FlightClock>()
+            .init_resource::<ActiveLaunchSystem>()
             .init_resource::<CameraFocusState>()
             .init_resource::<AudioCueQueue>();
     }
