@@ -1,6 +1,6 @@
 //! @file editor.rs
 //!
-//! @version 2.0.1
+//! @version 2.1.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -29,7 +29,9 @@ use crate::save_io::{
     delete_saved_craft, list_saved_crafts, load_craft_from_path, save_craft_blueprint,
 };
 use crate::shaders::PartMaterial;
-use crate::state::{ActiveBlueprint, GameMode, LivePartCatalog, part_style_id, uniform_border};
+use crate::state::{
+    ActiveBlueprint, ActiveLaunchSystem, GameMode, LivePartCatalog, part_style_id, uniform_border,
+};
 use crate::ui_kit::{
     BORDER_ON, BTN_BORDER, Tooltip, UI_ACCENT, UI_DIM, UI_OK, UI_TEXT, button_bundle,
     divider_bundle, panel_bundle, text_button,
@@ -145,6 +147,7 @@ enum AttachAction {
     ToggleRename,
     SaveCraft,
     ToggleCraftsDrawer,
+    ToggleLaunchSystem,
     Launch,
 }
 
@@ -372,12 +375,14 @@ fn bind_action(cmd: &mut EntityCommands<'_>, action: AttachAction) {
               catalog: Res<'_, LivePartCatalog>,
               mut active_bp: ResMut<'_, ActiveBlueprint>,
               mut ed_state: ResMut<'_, EditorState>,
+              mut launch_system: ResMut<'_, ActiveLaunchSystem>,
               mut next_mode: ResMut<'_, NextState<GameMode>>| {
             apply_editor_action(
                 action,
                 &catalog,
                 &mut active_bp,
                 &mut ed_state,
+                &mut launch_system,
                 &mut next_mode,
             );
         },
@@ -890,6 +895,14 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
                         },
                     ));
                 });
+
+            let mut system_button = text_button(
+                parent,
+                "SYSTEM: EARTH-MOON",
+                "Toggle between Earth-Moon and the Kepler Prime-Moon development system",
+                Some(220.0),
+            );
+            bind_action(&mut system_button, AttachAction::ToggleLaunchSystem);
 
             // Pinned Launch Button at bottom
             let mut launch = parent.spawn((
@@ -2095,6 +2108,7 @@ fn handle_editor_keyboard_shortcuts(
     catalog: Res<'_, LivePartCatalog>,
     mut active_bp: ResMut<'_, ActiveBlueprint>,
     mut ed_state: ResMut<'_, EditorState>,
+    mut launch_system: ResMut<'_, ActiveLaunchSystem>,
     mut next_mode: ResMut<'_, NextState<GameMode>>,
 ) {
     if ed_state.renaming_craft {
@@ -2192,7 +2206,14 @@ fn handle_editor_keyboard_shortcuts(
     };
 
     if let Some(act) = action {
-        apply_editor_action(act, &catalog, &mut active_bp, &mut ed_state, &mut next_mode);
+        apply_editor_action(
+            act,
+            &catalog,
+            &mut active_bp,
+            &mut ed_state,
+            &mut launch_system,
+            &mut next_mode,
+        );
     }
 }
 
@@ -2219,6 +2240,7 @@ fn apply_editor_action(
     catalog: &LivePartCatalog,
     active_bp: &mut ActiveBlueprint,
     ed_state: &mut EditorState,
+    launch_system: &mut ActiveLaunchSystem,
     next_mode: &mut NextState<GameMode>,
 ) {
     match action {
@@ -2400,6 +2422,13 @@ fn apply_editor_action(
         AttachAction::ToggleCraftsDrawer => {
             ed_state.crafts_drawer_open = !ed_state.crafts_drawer_open;
             ed_state.lists_dirty = true;
+        }
+        AttachAction::ToggleLaunchSystem => {
+            *launch_system = match *launch_system {
+                ActiveLaunchSystem::EarthMoon => ActiveLaunchSystem::KeplerMoon,
+                ActiveLaunchSystem::KeplerMoon => ActiveLaunchSystem::EarthMoon,
+            };
+            ed_state.status_note = format!("Launch system: {}.", launch_system.label());
         }
         AttachAction::Launch => {
             next_mode.set(GameMode::Flight);

@@ -1,6 +1,6 @@
 //! @file flight.rs
 //!
-//! @version 1.4.0
+//! @version 1.6.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -34,9 +34,9 @@ use crate::procedural_mesh::{
 use crate::save_io::{load_quicksave, save_quicksave};
 use crate::shaders::{AtmosphereMaterial, PartMaterial, PlumeMaterial, ReentryMaterial};
 use crate::state::{
-    ActiveBlueprint, AudioCue, AudioCueQueue, CameraFocusState, CameraFocusTarget, FlightClock,
-    FloatingOrigin, GameMode, LivePartCatalog, PHYSICAL_WARP_MAX_INDEX, TIME_WARP_LEVELS,
-    part_style_id, world_to_render_vec2,
+    ActiveBlueprint, ActiveLaunchSystem, AudioCue, AudioCueQueue, CameraFocusState,
+    CameraFocusTarget, FlightClock, FloatingOrigin, GameMode, LivePartCatalog,
+    PHYSICAL_WARP_MAX_INDEX, TIME_WARP_LEVELS, part_style_id, world_to_render_vec2,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -241,6 +241,7 @@ struct FlightStepContext<'w> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     active_bp: Res<'w, ActiveBlueprint>,
     catalog: Res<'w, LivePartCatalog>,
+    launch_system: Res<'w, ActiveLaunchSystem>,
     clock: ResMut<'w, FlightClock>,
     origin: ResMut<'w, FloatingOrigin>,
     focus: ResMut<'w, CameraFocusState>,
@@ -275,6 +276,7 @@ fn enter_flight(
     mut commands: Commands<'_, '_>,
     active_bp: Res<'_, ActiveBlueprint>,
     catalog: Res<'_, LivePartCatalog>,
+    launch_system: Res<'_, ActiveLaunchSystem>,
     mut clock: ResMut<'_, FlightClock>,
     mut origin: ResMut<'_, FloatingOrigin>,
     mut assets: FlightAssets<'_>,
@@ -283,14 +285,21 @@ fn enter_flight(
     clock.paused = false;
     clock.physical_capped = true;
 
-    let world =
-        match SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog) {
-            Ok(w) => w,
-            Err(err) => {
-                error!("Failed to initialize flight simulation: {err}");
-                SimWorld::new()
-            }
-        };
+    let world = match *launch_system {
+        ActiveLaunchSystem::EarthMoon => {
+            SimWorld::with_earth_moon_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+        }
+        ActiveLaunchSystem::KeplerMoon => {
+            SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+        }
+    };
+    let world = match world {
+        Ok(w) => w,
+        Err(err) => {
+            error!("Failed to initialize flight simulation: {err}");
+            SimWorld::new()
+        }
+    };
 
     if let Some(active) = world.active_vessel() {
         origin.origin_m = active.pos;
@@ -316,7 +325,7 @@ fn enter_flight(
         maneuver: ManeuverPlan::default(),
         transfer_est: None,
         last_prediction: pred,
-        status_banner: String::from("Ready on Kepler Prime launchpad."),
+        status_banner: format!("Ready on {} launchpad.", launch_system.label()),
         pause_menu_open: false,
         recovered_summary: false,
         show_controls_help: false,
@@ -548,15 +557,22 @@ fn step_flight_controls_and_physics(
     let keys = &ctx.keys;
     let active_bp = &ctx.active_bp;
     let catalog = &ctx.catalog;
+    let launch_system = &ctx.launch_system;
     let clock = &mut ctx.clock;
     let origin = &mut ctx.origin;
     let focus = &mut ctx.focus;
 
     if flight.request_revert_pad {
         flight.request_revert_pad = false;
-        if let Ok(new_world) =
-            SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
-        {
+        let new_world = match **launch_system {
+            ActiveLaunchSystem::EarthMoon => {
+                SimWorld::with_earth_moon_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+            }
+            ActiveLaunchSystem::KeplerMoon => {
+                SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+            }
+        };
+        if let Ok(new_world) = new_world {
             flight.world = new_world;
             flight.throttle = 1.0;
             flight.sas_enabled = true;
