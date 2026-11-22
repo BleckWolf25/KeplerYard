@@ -22,12 +22,15 @@ use crate::state::{
     CameraFocusState, CameraFocusTarget, FlightClock, FloatingOrigin, GameMode, uniform_border,
     world_to_render_vec2,
 };
+use crate::ui_kit::{BTN_BORDER, Tooltip};
 use bevy::ecs::system::SystemParam;
 use bevy::picking::Pickable;
 use bevy::picking::hover::Hovered;
 use bevy::prelude::*;
 use bevy::ui::Pressed;
-use bevy::ui_widgets::{Activate, Button};
+use bevy::ui_widgets::{
+    Activate, Button, Slider, SliderOrientation, SliderRange, SliderThumb, SliderValue, ValueChange,
+};
 use kepler_core::{ApsisKind, DVec2, SasMode, body::dominant_body, compute_hohmann_transfer};
 
 // ---------- CONSTANTS
@@ -66,8 +69,15 @@ pub struct RecoverButtonMarker;
 #[derive(Component)]
 pub struct FlightMapBadge(pub usize);
 
+#[derive(Component)]
+pub(crate) struct ThrottleThumb;
+
+#[derive(Component)]
+pub(crate) struct ThrottlePercentText;
+
 #[derive(Clone, Copy)]
 pub enum FlightUiAction {
+    TriggerStage,
     ToggleSas,
     SetSasMode(SasMode),
     ToggleRcs,
@@ -202,7 +212,17 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                 .with_children(|bar| {
                     spawn_hud_btn(
                         bar,
+                        "STAGE [Space]",
+                        "Fire the next stage: ignite its engines, separate, or deploy its chute",
+                        FlightUiAction::TriggerStage,
+                        None,
+                        None,
+                        None,
+                    );
+                    spawn_hud_btn(
+                        bar,
                         "SAS [T]",
+                        "Stability Assist: holds the ship's current orientation",
                         FlightUiAction::ToggleSas,
                         Some(SasToggleButton),
                         None,
@@ -218,6 +238,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                         spawn_hud_btn(
                             bar,
                             mode.label(),
+                            "SAS hold mode - click to switch and enable SAS",
                             FlightUiAction::SetSasMode(mode),
                             None,
                             Some(SasModeButton(mode)),
@@ -227,12 +248,15 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     spawn_hud_btn(
                         bar,
                         "RCS [R]",
+                        "Toggle RCS thrusters for fine translation (H/N fore-aft, Q/E lateral)",
                         FlightUiAction::ToggleRcs,
                         None,
                         None,
                         Some(RcsToggleButton),
                     );
                 });
+
+            spawn_throttle_slider(parent);
 
             parent
                 .spawn(Node {
@@ -246,6 +270,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     spawn_hud_btn(
                         bar,
                         "Plan TLI [M]",
+                        "Plan a Hohmann transfer burn to Selene",
                         FlightUiAction::PlanSelene,
                         None,
                         None,
@@ -254,6 +279,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     spawn_hud_btn(
                         bar,
                         "Clear [V]",
+                        "Clear the planned maneuver node",
                         FlightUiAction::ClearManeuver,
                         None,
                         None,
@@ -262,6 +288,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     spawn_hud_btn(
                         bar,
                         "Vessel [ ] ]",
+                        "Cycle control to another vessel in flight",
                         FlightUiAction::CycleVessel,
                         None,
                         None,
@@ -270,6 +297,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     spawn_hud_btn(
                         bar,
                         "Focus [Tab]",
+                        "Cycle the camera's focus between your vessel and nearby bodies",
                         FlightUiAction::CycleFocus,
                         None,
                         None,
@@ -278,6 +306,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     spawn_hud_btn(
                         bar,
                         "Keys [?]",
+                        "Show or hide the full keyboard shortcut list",
                         FlightUiAction::ToggleControlsHelp,
                         None,
                         None,
@@ -418,6 +447,7 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
 fn spawn_hud_btn(
     bar: &mut ChildSpawnerCommands<'_>,
     caption: &str,
+    tooltip: &str,
     action: FlightUiAction,
     sas_toggle: Option<SasToggleButton>,
     sas_mode: Option<SasModeButton>,
@@ -426,6 +456,7 @@ fn spawn_hud_btn(
     let mut cmd = bar.spawn((
         Button,
         Hovered::default(),
+        Tooltip(tooltip.to_owned()),
         Node {
             padding: UiRect::axes(px(6.0), px(3.0)),
             border: UiRect::all(px(1.0)),
@@ -471,6 +502,110 @@ fn spawn_hud_btn(
     });
 }
 
+const THROTTLE_TRACK_W: f32 = 150.0;
+const THROTTLE_THUMB_W: f32 = 16.0;
+
+/// A vertical click-and-drag throttle control, so the mouse can set thrust directly instead of
+/// only nudging it with Shift/Ctrl. Keyboard throttle control keeps working side by side.
+fn spawn_throttle_slider(parent: &mut ChildSpawnerCommands<'_>) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: px(8.0),
+            margin: UiRect::top(px(2.0)),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new("Throttle"),
+                TextFont::from_font_size(10.5),
+                TextColor(Color::srgb(0.88, 0.96, 1.0)),
+                Pickable::IGNORE,
+            ));
+            row.spawn((
+                Slider {
+                    orientation: SliderOrientation::Horizontal,
+                    ..default()
+                },
+                SliderRange::new(0.0, 100.0),
+                SliderValue(100.0),
+                Tooltip(String::from(
+                    "Drag to set throttle directly\n[Shift/Up] More  [Ctrl/Down] Less  [Z] Full  [X] Cut",
+                )),
+                Node {
+                    position_type: PositionType::Relative,
+                    width: px(THROTTLE_TRACK_W),
+                    height: px(18.0),
+                    padding: UiRect::all(px(2.0)),
+                    border: UiRect::all(px(1.0)),
+                    border_radius: BorderRadius::all(CornerRadius::circular(px(9.0))),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.14, 0.22, 0.92)),
+                uniform_border(BTN_BORDER),
+            ))
+            .with_children(|track| {
+                track.spawn((
+                    ThrottleThumb,
+                    SliderThumb,
+                    Pickable::IGNORE,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(0.0),
+                        top: px(1.0),
+                        width: px(THROTTLE_THUMB_W),
+                        height: px(14.0),
+                        border_radius: BorderRadius::all(CornerRadius::circular(px(7.0))),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.30, 0.95, 0.55)),
+                ));
+            })
+            .observe(
+                move |ev: On<'_, '_, ValueChange<f32>>, mut flight: ResMut<'_, FlightSimState>| {
+                    flight.throttle_override = Some((f64::from(ev.value) / 100.0).clamp(0.0, 1.0));
+                },
+            );
+            row.spawn((
+                ThrottlePercentText,
+                Text::new("100%"),
+                TextFont::from_font_size(10.5),
+                TextColor(Color::srgb(0.88, 0.96, 1.0)),
+                Pickable::IGNORE,
+            ));
+        });
+}
+
+/// Keeps the throttle slider's thumb position, value, and readout in sync with the sim, in
+/// either direction: dragging the slider sets throttle (via `ValueChange`'s observer), and
+/// keyboard throttle changes move the slider back to match.
+pub(crate) fn sync_throttle_slider(
+    flight: Res<'_, FlightSimState>,
+    mut commands: Commands<'_, '_>,
+    slider_q: Query<'_, '_, (Entity, &SliderValue), With<Slider>>,
+    mut thumb_q: Query<'_, '_, &mut Node, With<ThrottleThumb>>,
+    mut pct_q: Query<'_, '_, &mut Text, With<ThrottlePercentText>>,
+) {
+    let target = (flight.throttle * 100.0).clamp(0.0, 100.0) as f32;
+    let Ok((entity, value)) = slider_q.single() else {
+        return;
+    };
+    if (value.0 - target).abs() > 0.05 {
+        commands.entity(entity).insert(SliderValue(target));
+    }
+    if let Ok(mut node) = thumb_q.single_mut() {
+        let travel = THROTTLE_TRACK_W - THROTTLE_THUMB_W - 4.0;
+        node.left = px((value.0 / 100.0).clamp(0.0, 1.0) * travel);
+    }
+    if let Ok(mut text) = pct_q.single_mut() {
+        let new_text = format!("{:.0}%", flight.throttle * 100.0);
+        if text.0 != new_text {
+            text.0 = new_text;
+        }
+    }
+}
+
 fn spawn_modal_btn(
     card: &mut ChildSpawnerCommands<'_>,
     caption: &str,
@@ -480,6 +615,7 @@ fn spawn_modal_btn(
     let mut cmd = card.spawn((
         Button,
         Hovered::default(),
+        Tooltip(caption.to_owned()),
         Node {
             padding: UiRect::axes(px(10.0), px(7.0)),
             align_items: AlignItems::Center,
@@ -530,6 +666,9 @@ pub fn apply_flight_ui_action(
     next_mode: &mut NextState<GameMode>,
 ) {
     match action {
+        FlightUiAction::TriggerStage => {
+            flight.stage_requested = true;
+        }
         FlightUiAction::ToggleSas => {
             flight.sas_enabled = !flight.sas_enabled;
         }

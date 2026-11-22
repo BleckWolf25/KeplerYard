@@ -1,23 +1,26 @@
 //! @file editor.rs
 //!
-//! @version 1.3.0
+//! @version 2.0.0
 //! @author `BleckWolf25`
 //! @license MIT
 //!
-//! @summary Freeform SFS-style VAB assembly editor with symmetry, rotation, icons, and craft library
+//! @summary Mouse-first, SFS-style VAB assembly editor with symmetry, snapping, and craft library
 //!
 //! @description
-//! Implements freeform drag-and-drop rocket construction: parts snap flush onto attach nodes when
-//! near them or drop anywhere in the bay on a 0.10 m grid (holding Shift bypasses snap), Ctrl+Drag
-//! moves a single part without its children, dragging the root moves the whole rocket, Q/E rotates,
-//! F mirrors, arrows nudge, and every category/action button renders crisp `FromWorld` icons.
+//! Easy to learn, hard to master. Click a catalog part to pick it up and click the bay to place it
+//! (hold Shift to keep placing), or drag it straight in. Parts snap flush onto glowing attach nodes
+//! and otherwise drop on a 0.10 m grid. A floating toolbar follows the selected part (rotate,
+//! flip, clone, crossfeed, stage, delete), right-click deletes, dragging empty space pans, and the
+//! wheel zooms toward the cursor. Every control also keeps its keyboard shortcut and a hover tooltip.
+//! "Auto-attach" builds a rocket in a few clicks; stages, crossfeed, symmetry and the craft library
+//! remain for mastery.
 //!
 //! @since 21/11/2026
 //! @updated 21/11/2026
 
 // ---------- IMPORTS
 
-use crate::camera::MainCamera;
+use crate::camera::{CameraZoomState, MainCamera, is_pointer_over_interactive_ui};
 use crate::part_icons::{PartIconRegistry, UiIconKind};
 use crate::procedural_mesh::build_part_mesh;
 use crate::save_io::{
@@ -25,17 +28,21 @@ use crate::save_io::{
 };
 use crate::shaders::PartMaterial;
 use crate::state::{ActiveBlueprint, GameMode, LivePartCatalog, part_style_id, uniform_border};
+use crate::ui_kit::{
+    BORDER_ON, BTN_BORDER, UI_ACCENT, UI_DIM, UI_OK, UI_TEXT, button_bundle, divider_bundle,
+    panel_bundle, text_button, Tooltip,
+};
 use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::picking::Pickable;
-use bevy::picking::hover::Hovered;
+use bevy::picking::hover::{HoverMap, Hovered};
 use bevy::prelude::*;
 use bevy::ui::Pressed;
 use bevy::ui_widgets::{Activate, Button, ScrollArea};
 use kepler_core::{
-    AttachKind, BlueprintAnalysis, DVec2, PartCategory, PartKind, VesselBlueprint,
-    analyze_blueprint, lunar_capable_blueprint, starter_two_stage_blueprint,
+    AttachKind, BlueprintAnalysis, DVec2, PartCategory, PartKind, PartSpec, PlacedPart,
+    VesselBlueprint, analyze_blueprint, lunar_capable_blueprint, starter_two_stage_blueprint,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -43,10 +50,15 @@ use std::fmt::Write as _;
 // ---------- CONSTANTS
 
 const GRID_SNAP_M: f64 = 0.10;
-const PALETTE_PANEL_WIDTH: f32 = 286.0;
-const INSPECTOR_PANEL_WIDTH: f32 = 356.0;
+const PALETTE_PANEL_WIDTH: f32 = 300.0;
+const INSPECTOR_PANEL_WIDTH: f32 = 340.0;
 const DRAG_THRESHOLD_PX: f32 = 7.0;
-const MAX_UNDO_HISTORY: usize = 40;
+const CLICK_SLOP_PX: f32 = 6.0;
+const MAX_UNDO_HISTORY: usize = 60;
+const TOOLBAR_W: f32 = 352.0;
+const TOOLBAR_H: f32 = 38.0;
+const TOP_BAR_CLEARANCE: f32 = 64.0;
+const SNAP_RADIUS_PX: f64 = 52.0;
 
 // ---------- TYPES
 
@@ -60,9 +72,6 @@ struct EditorPartNode {
 
 #[derive(Component)]
 struct EditorDragGhost;
-
-#[derive(Component)]
-struct EditorReadoutText;
 
 #[derive(Component)]
 struct EditorPaletteGrid;
@@ -83,20 +92,42 @@ struct PaletteButton(String);
 struct CategoryTabButton(Option<PartCategory>);
 
 #[derive(Component)]
-struct SymmetryStatusText;
-
-#[derive(Component)]
-struct RenameButtonText;
-
-#[derive(Component)]
 struct LaunchButtonMarker;
+
+#[derive(Component)]
+struct SelectionToolbar;
+
+#[derive(Component)]
+struct CrossfeedToolButton;
+
+/// Which dynamic text a `Text` entity displays; one query updates them all.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum EditorText {
+    Readout,
+    SymStatus,
+    CraftName,
+    SymLabel,
+    Brush,
+    Hint,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToggleKind {
+    Symmetry,
+    Snap,
+}
+
+#[derive(Component)]
+struct ToggleButton(ToggleKind);
 
 #[derive(Clone, Copy)]
 enum AttachAction {
     AttachBottom,
     AttachTop,
     AttachRadialPair,
+    AutoAttach,
     ToggleSymmetry,
+    ToggleSnap,
     RotateLeft,
     RotateRight,
     FlipMirror,
@@ -136,11 +167,17 @@ struct SnapTarget {
 #[derive(Clone, Debug)]
 enum DragPhase {
     Idle,
+    /// Left button went down on a catalog tile; becomes a drag or a click-to-carry.
     PendingPalette {
         spec_id: String,
         start_cursor: Vec2,
     },
+    /// Dragging a new part out of the catalog (release to drop).
     DraggingNew {
+        spec_id: String,
+    },
+    /// Part picked up by a click; follows the cursor until the next click places it.
+    Carrying {
         spec_id: String,
     },
     PendingExisting {
@@ -154,6 +191,12 @@ enum DragPhase {
         part_id: u64,
         last_world: DVec2,
         is_root: bool,
+    },
+    /// Left-drag on empty space pans the view; a plain click deselects.
+    PanningCanvas {
+        start_cursor: Vec2,
+        start_pan: Vec2,
+        moved: bool,
     },
 }
 
@@ -170,9 +213,12 @@ struct EditorState {
     lists_dirty: bool,
     crafts_drawer_open: bool,
     symmetry_2x: bool,
+    snap_nodes: bool,
     renaming_craft: bool,
     drag: DragPhase,
     snap_preview: Option<DVec2>,
+    hover_part: Option<u64>,
+    right_press: Option<Vec2>,
     undo_stack: VecDeque<VesselBlueprint>,
     redo_stack: VecDeque<VesselBlueprint>,
     status_note: String,
@@ -185,6 +231,8 @@ struct EditorContext<'w, 's> {
     catalog: Res<'w, LivePartCatalog>,
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
+    hover_map: Res<'w, HoverMap>,
+    ui_nodes: Query<'w, 's, Option<&'static Pickable>, With<Node>>,
 }
 
 #[derive(SystemParam)]
@@ -203,24 +251,10 @@ struct EditorUiLists<'w, 's> {
     children_q: Query<'w, 's, &'static Children>,
 }
 
-type RenameTextQuery<'w, 's> = Query<
-    'w,
-    's,
-    &'static mut Text,
-    (
-        With<RenameButtonText>,
-        Without<EditorReadoutText>,
-        Without<SymmetryStatusText>,
-    ),
->;
-
 #[derive(SystemParam)]
 #[allow(clippy::struct_field_names)]
 struct EditorReadoutQueries<'w, 's> {
-    readout_q: Query<'w, 's, &'static mut Text, With<EditorReadoutText>>,
-    sym_text_q:
-        Query<'w, 's, &'static mut Text, (With<SymmetryStatusText>, Without<EditorReadoutText>)>,
-    rename_text_q: RenameTextQuery<'w, 's>,
+    text_q: Query<'w, 's, (&'static EditorText, &'static mut Text)>,
     mat_q: Query<
         'w,
         's,
@@ -235,6 +269,12 @@ struct EditorReadoutQueries<'w, 's> {
         's,
         (&'static CategoryTabButton, &'static mut BorderColor),
         Without<PaletteButton>,
+    >,
+    toggle_q: Query<
+        'w,
+        's,
+        (&'static ToggleButton, &'static mut BorderColor),
+        (Without<PaletteButton>, Without<CategoryTabButton>),
     >,
 }
 
@@ -264,14 +304,15 @@ impl Default for EditorState {
             lists_dirty: true,
             crafts_drawer_open: false,
             symmetry_2x: true,
+            snap_nodes: true,
             renaming_craft: false,
             drag: DragPhase::Idle,
             snap_preview: None,
+            hover_part: None,
+            right_press: None,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
-            status_note: String::from(
-                "Drop parts anywhere (Shift bypasses snap). [Q/E] Rot [F] Flip",
-            ),
+            status_note: String::from("Pick a part on the left, then click the bay to place it."),
         }
     }
 }
@@ -323,13 +364,111 @@ fn cleanup_editor(
     commands.remove_resource::<EditorMeshCache>();
 }
 
+fn bind_action(cmd: &mut EntityCommands<'_>, action: AttachAction) {
+    cmd.observe(
+        move |_act: On<'_, '_, Activate>,
+              catalog: Res<'_, LivePartCatalog>,
+              mut active_bp: ResMut<'_, ActiveBlueprint>,
+              mut ed_state: ResMut<'_, EditorState>,
+              mut next_mode: ResMut<'_, NextState<GameMode>>| {
+            apply_editor_action(
+                action,
+                &catalog,
+                &mut active_bp,
+                &mut ed_state,
+                &mut next_mode,
+            );
+        },
+    );
+}
+
+fn spawn_icon(parent: &mut ChildSpawnerCommands<'_>, handle: Handle<Image>, size: f32) {
+    parent.spawn((
+        ImageNode::new(handle),
+        Pickable::IGNORE,
+        Node {
+            width: px(size),
+            height: px(size),
+            min_width: px(size),
+            min_height: px(size),
+            flex_shrink: 0.0,
+            ..default()
+        },
+    ));
+}
+
+fn label_text(text: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+    (
+        Text::new(text.into()),
+        TextFont::from_font_size(size),
+        TextColor(color),
+        Pickable::IGNORE,
+    )
+}
+
+/// Human-readable stat sheet for a part (used by tooltips and the brush card).
+fn part_summary(spec: &PartSpec) -> String {
+    let mut s = format!(
+        "{}\nMass {:.0} kg (dry {:.0} kg)",
+        spec.display_name,
+        spec.full_mass_kg(),
+        spec.dry_mass_kg
+    );
+    let _ = match spec.kind {
+        PartKind::CommandPod(p) => write!(
+            s,
+            "\n{} command pod, torque {:.0} N*m",
+            if p.crewed { "Crewed" } else { "Probe" },
+            p.reaction_torque_nm
+        ),
+        PartKind::Tank(t) => write!(s, "\nPropellant {:.0} kg", t.fuel_capacity_kg),
+        PartKind::Engine(e) => write!(
+            s,
+            "\nThrust {:.0} kN | Isp {:.0} s | gimbal {:.1} deg",
+            e.max_thrust_n / 1000.0,
+            e.isp_s,
+            e.gimbal_range_rad.to_degrees()
+        ),
+        PartKind::SolidBooster(b) => write!(
+            s,
+            "\nSolid motor {:.0} kN | Isp {:.0} s | grain {:.0} kg",
+            b.max_thrust_n / 1000.0,
+            b.isp_s,
+            b.fuel_capacity_kg
+        ),
+        PartKind::Decoupler(d) => write!(
+            s,
+            "\nSeparates a stage ({:.0} N*s){}",
+            d.ejection_impulse_ns,
+            if d.crossfeed { " | crossfeed" } else { "" }
+        ),
+        PartKind::Fin(f) => write!(s, "\nStabilising fin, lift area {:.2} m2", f.lift_area_m2),
+        PartKind::Rcs(r) => write!(s, "\nRCS {:.0} N | Isp {:.0} s", r.thrust_n, r.isp_s),
+        PartKind::Parachute(p) => write!(s, "\nDeployed drag area {:.0} m2", p.deployed_drag_area_m2),
+        PartKind::HeatShield(h) => write!(s, "\nAblator {:.0} kg", h.ablator_kg),
+        PartKind::LandingLeg(l) => write!(s, "\nSurvives {:.1} m/s touchdown", l.impact_tolerance_m_s),
+        PartKind::NoseCone(n) => write!(s, "\nDrag reduction {:.0}%", n.drag_reduction * 100.0),
+    };
+    let mut nodes = Vec::new();
+    if spec.stack_top {
+        nodes.push("top");
+    }
+    if spec.stack_bottom {
+        nodes.push("bottom");
+    }
+    if spec.radial_attach {
+        nodes.push("side");
+    }
+    let _ = write!(s, "\nAttaches: {}", nodes.join(", "));
+    s
+}
+
 #[allow(clippy::too_many_lines)]
 fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
     let panel_bg = BackgroundColor(Color::srgba(0.04, 0.07, 0.12, 0.92));
     let border = uniform_border(Color::srgba(0.18, 0.65, 0.88, 0.55));
-    let text_col = TextColor(Color::srgb(0.88, 0.96, 1.0));
 
-    // Left panel: Scrollable Parts Catalog
+    // ---- Left panel: parts catalog, brush card, quick attach
     commands
         .spawn((
             EditorEntity,
@@ -350,11 +489,7 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
             border,
         ))
         .with_children(|parent| {
-            parent.spawn((
-                Text::new("PARTS CATALOG"),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(0.32, 0.88, 1.0)),
-            ));
+            parent.spawn(label_text("PARTS CATALOG", 14.0, UI_ACCENT));
 
             parent
                 .spawn(Node {
@@ -393,25 +528,219 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
                 },
             ));
 
-            parent.spawn((
-                SymmetryStatusText,
-                Text::new("Symmetry: 2x [X]  |  Scroll catalog"),
-                TextFont::from_font_size(11.0),
-                TextColor(Color::srgb(0.35, 0.95, 0.72)),
-            ));
+            // Brush card: stats of the part currently in hand
+            parent
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(5.0),
+                        padding: UiRect::all(px(7.0)),
+                        border: UiRect::all(px(1.0)),
+                        border_radius: BorderRadius::all(CornerRadius::circular(px(4.0))),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.06, 0.10, 0.17, 0.96)),
+                    uniform_border(Color::srgba(0.32, 0.72, 0.92, 0.45)),
+                ))
+                .with_children(|card| {
+                    card.spawn((
+                        EditorText::Brush,
+                        label_text("", 10.5, UI_TEXT),
+                    ));
 
-            parent.spawn((
-                Text::new(
-                    "Drop parts anywhere on grid (Shift: free)\n\
-                     Ctrl+Drag: Single part | Alt+Drag: Clone\n\
-                     Q/E: Rotate | F: Flip | Arrows: Nudge",
-                ),
-                TextFont::from_font_size(10.5),
-                TextColor(Color::srgba(0.68, 0.82, 0.92, 0.85)),
+                    let mut auto = text_button(
+                        card,
+                        "AUTO-ATTACH to selected [A]",
+                        "Attach the part in hand to the selected part's next free node.\nRepeat to chain parts downward in one click each.",
+                        None,
+                    );
+                    bind_action(&mut auto, AttachAction::AutoAttach);
+
+                    card.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(4.0),
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        for (label, tip, action) in [
+                            ("Below [B]", "Attach below the selected part", AttachAction::AttachBottom),
+                            ("Above [T]", "Attach above the selected part", AttachAction::AttachTop),
+                            ("Side [R]", "Attach a radial pair to the selected part", AttachAction::AttachRadialPair),
+                        ] {
+                            let mut b = text_button(row, label, tip, Some(76.0));
+                            bind_action(&mut b, action);
+                        }
+                    });
+                });
+
+            parent.spawn((EditorText::SymStatus, label_text("", 11.0, UI_OK)));
+            parent.spawn(label_text(
+                "Click a part, then click the bay (Shift: keep placing)\n\
+                 Drag parts in or around the rocket | Right-click: delete\n\
+                 Drag empty space: pan | Scroll: zoom | Q/E rotate | F flip\n\
+                 Ctrl+Drag: move one part | Alt+Drag: clone",
+                10.0,
+                UI_DIM,
             ));
         });
 
-    // Right panel: Assembly Readout, Actions, Stage Stack, Craft Library & Launch
+    // ---- Top bar: history, modes, craft name, file
+    commands
+        .spawn((
+            EditorEntity,
+            Pickable::IGNORE,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(PALETTE_PANEL_WIDTH + 24.0),
+                right: px(INSPECTOR_PANEL_WIDTH + 24.0),
+                top: px(12.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            row.spawn(panel_bundle()).with_children(|bar| {
+                let mut c = text_button(bar, "Undo", "Undo the last edit [Ctrl+Z]", Some(54.0));
+                bind_action(&mut c, AttachAction::Undo);
+                let mut c = text_button(bar, "Redo", "Redo [Ctrl+Y]", Some(54.0));
+                bind_action(&mut c, AttachAction::Redo);
+
+                bar.spawn(divider_bundle());
+
+                let mut sym = bar.spawn(button_bundle(
+                    Some(86.0),
+                    "Mirror symmetry [X]\nParts placed, moved, rotated or staged on one side are mirrored on the other.",
+                ));
+                sym.insert(ToggleButton(ToggleKind::Symmetry));
+                bind_action(&mut sym, AttachAction::ToggleSymmetry);
+                sym.with_children(|b| {
+                    b.spawn((EditorText::SymLabel, label_text("Sym 2x", 11.0, UI_TEXT)));
+                });
+
+                let mut snap = bar.spawn(button_bundle(
+                    Some(70.0),
+                    "Node snapping [S]\nWhen on, parts click onto glowing attach nodes. Hold Shift to place freely.",
+                ));
+                snap.insert(ToggleButton(ToggleKind::Snap));
+                bind_action(&mut snap, AttachAction::ToggleSnap);
+                snap.with_children(|b| {
+                    b.spawn(label_text("Snap", 11.0, UI_TEXT));
+                });
+
+                bar.spawn(divider_bundle());
+
+                let mut name = bar.spawn(button_bundle(
+                    Some(210.0),
+                    "Craft name - click to rename, then type and press Enter",
+                ));
+                bind_action(&mut name, AttachAction::ToggleRename);
+                name.with_children(|b| {
+                    b.spawn((EditorText::CraftName, label_text("Craft", 12.0, UI_TEXT)));
+                });
+
+                bar.spawn(divider_bundle());
+
+                let mut save = bar.spawn(button_bundle(Some(72.0), "Save this craft to disk [Ctrl+S]"));
+                bind_action(&mut save, AttachAction::SaveCraft);
+                save.with_children(|b| {
+                    if let Some(h) = icons.ui_icons.get(&UiIconKind::Save) {
+                        spawn_icon(b, h.clone(), 14.0);
+                    }
+                    b.spawn(label_text("Save", 11.0, UI_TEXT));
+                });
+
+                let mut lib = bar.spawn(button_bundle(
+                    Some(92.0),
+                    "Craft library: load or delete saved crafts, or start from a preset rocket",
+                ));
+                bind_action(&mut lib, AttachAction::ToggleCraftsDrawer);
+                lib.with_children(|b| {
+                    if let Some(h) = icons.ui_icons.get(&UiIconKind::Load) {
+                        spawn_icon(b, h.clone(), 14.0);
+                    }
+                    b.spawn(label_text("Library", 11.0, UI_TEXT));
+                });
+            });
+        });
+
+    // ---- Context hint bar (bottom centre)
+    commands
+        .spawn((
+            EditorEntity,
+            Pickable::IGNORE,
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(PALETTE_PANEL_WIDTH + 24.0),
+                right: px(INSPECTOR_PANEL_WIDTH + 24.0),
+                bottom: px(12.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Pickable::IGNORE,
+                Node {
+                    padding: UiRect::axes(px(12.0), px(6.0)),
+                    border: UiRect::all(px(1.0)),
+                    border_radius: BorderRadius::all(CornerRadius::circular(px(5.0))),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.03, 0.06, 0.11, 0.86)),
+                uniform_border(Color::srgba(0.20, 0.72, 0.94, 0.40)),
+            ))
+            .with_children(|pill| {
+                pill.spawn((EditorText::Hint, label_text("", 11.5, UI_TEXT)));
+            });
+        });
+
+    // ---- Floating toolbar that follows the selected part
+    commands
+        .spawn((
+            EditorEntity,
+            SelectionToolbar,
+            GlobalZIndex(5),
+            Node {
+                position_type: PositionType::Absolute,
+                display: Display::None,
+                left: px(0.0),
+                top: px(0.0),
+                min_width: px(TOOLBAR_W),
+                padding: UiRect::all(px(5.0)),
+                column_gap: px(3.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(px(1.0)),
+                border_radius: BorderRadius::all(CornerRadius::circular(px(6.0))),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.03, 0.06, 0.11, 0.95)),
+            uniform_border(Color::srgba(0.28, 0.92, 1.0, 0.80)),
+        ))
+        .with_children(|bar| {
+            let tools = [
+                ("Rot+", "Rotate +15 deg [Q]  (Shift+Q: 90 deg)", AttachAction::RotateLeft),
+                ("Rot-", "Rotate -15 deg [E]  (Shift+E: 90 deg)", AttachAction::RotateRight),
+                ("Flip", "Mirror the part left/right [F]", AttachAction::FlipMirror),
+                ("Copy", "Clone this part and everything attached below it [Ctrl+D]", AttachAction::DuplicateSelected),
+                ("CF", "Toggle fuel crossfeed through this decoupler", AttachAction::ToggleCrossfeed),
+                ("S-", "Move to an earlier stage [ [ ]", AttachAction::StageDown),
+                ("S+", "Move to a later stage [ ] ]", AttachAction::StageUp),
+                ("Del", "Delete part and its attachments [Del] (right-click also deletes)", AttachAction::DeleteSelected),
+            ];
+            for (label, tip, action) in tools {
+                let mut b = text_button(bar, label, tip, Some(38.0));
+                bind_action(&mut b, action);
+                if label == "CF" {
+                    b.insert(CrossfeedToolButton);
+                }
+                if label == "Del" {
+                    b.insert(uniform_border(Color::srgba(0.92, 0.34, 0.34, 0.7)));
+                }
+            }
+        });
+
+    // ---- Right panel: assembly readout, stage stack, craft library, launch
     commands
         .spawn((
             EditorEntity,
@@ -432,11 +761,7 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
             border,
         ))
         .with_children(|parent| {
-            parent.spawn((
-                Text::new("KEPLER YARD - ASSEMBLY"),
-                TextFont::from_font_size(14.0),
-                TextColor(Color::srgb(0.32, 0.88, 1.0)),
-            ));
+            parent.spawn(label_text("KEPLER YARD - ASSEMBLY", 14.0, UI_ACCENT));
 
             parent
                 .spawn((
@@ -452,125 +777,13 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
                 ))
                 .with_children(|body| {
                     body.spawn((
-                        EditorReadoutText,
+                        EditorText::Readout,
                         Text::new("Analyzing blueprint..."),
                         TextFont::from_font_size(11.5),
-                        text_col,
+                        TextColor(UI_TEXT),
                     ));
 
-                    body.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        flex_wrap: FlexWrap::Wrap,
-                        column_gap: px(5.0),
-                        row_gap: px(5.0),
-                        ..default()
-                    })
-                    .with_children(|grid| {
-                        let compact_btns = [
-                            ("Below [B]", AttachAction::AttachBottom, None),
-                            ("Above [T]", AttachAction::AttachTop, None),
-                            ("Radial Pair [R]", AttachAction::AttachRadialPair, None),
-                            ("Sym 1x/2x [X]", AttachAction::ToggleSymmetry, None),
-                            ("Rot +15 [Q]", AttachAction::RotateLeft, None),
-                            ("Rot -15 [E]", AttachAction::RotateRight, None),
-                            ("Flip Mirror [F]", AttachAction::FlipMirror, None),
-                            ("Clone Subtree", AttachAction::DuplicateSelected, None),
-                            ("Crossfeed", AttachAction::ToggleCrossfeed, None),
-                            ("Delete [Del]", AttachAction::DeleteSelected, None),
-                            ("Stage - [ [ ]", AttachAction::StageDown, None),
-                            ("Stage + [ ] ]", AttachAction::StageUp, None),
-                            ("Undo [Ctrl+Z]", AttachAction::Undo, None),
-                            ("Redo [Ctrl+Y]", AttachAction::Redo, None),
-                            ("Rename Craft", AttachAction::ToggleRename, None),
-                            (
-                                "Save Craft",
-                                AttachAction::SaveCraft,
-                                Some(UiIconKind::Save),
-                            ),
-                            (
-                                "Crafts Library",
-                                AttachAction::ToggleCraftsDrawer,
-                                Some(UiIconKind::Load),
-                            ),
-                            (
-                                "Preset: Selene",
-                                AttachAction::LoadLunarPreset,
-                                Some(UiIconKind::RocketPreset),
-                            ),
-                            (
-                                "Preset: Kepler-I",
-                                AttachAction::ResetStarter,
-                                Some(UiIconKind::RocketPreset),
-                            ),
-                        ];
-
-                        for (caption, action, icon_kind) in compact_btns {
-                            let is_rename = matches!(action, AttachAction::ToggleRename);
-                            let mut btn_cmd = grid.spawn((
-                                Button,
-                                Hovered::default(),
-                                Node {
-                                    width: px(158.0),
-                                    padding: UiRect::axes(px(7.0), px(5.0)),
-                                    column_gap: px(5.0),
-                                    align_items: AlignItems::Center,
-                                    justify_content: JustifyContent::Center,
-                                    border: UiRect::all(px(1.0)),
-                                    border_radius: BorderRadius::all(CornerRadius::circular(px(
-                                        4.0,
-                                    ))),
-                                    ..default()
-                                },
-                                BackgroundColor(Color::srgba(0.08, 0.14, 0.22, 0.92)),
-                                uniform_border(Color::srgba(0.24, 0.52, 0.72, 0.5)),
-                            ));
-                            btn_cmd
-                                .observe(
-                                    move |_act: On<'_, '_, Activate>,
-                                          catalog: Res<'_, LivePartCatalog>,
-                                          mut active_bp: ResMut<'_, ActiveBlueprint>,
-                                          mut ed_state: ResMut<'_, EditorState>,
-                                          mut next_mode: ResMut<'_, NextState<GameMode>>| {
-                                        apply_editor_action(
-                                            action,
-                                            &catalog,
-                                            &mut active_bp,
-                                            &mut ed_state,
-                                            &mut next_mode,
-                                        );
-                                    },
-                                )
-                                .with_children(|btn| {
-                                    if let Some(ik) = icon_kind
-                                        && let Some(handle) = icons.ui_icons.get(&ik)
-                                    {
-                                        btn.spawn((
-                                            ImageNode::new(handle.clone()),
-                                            Pickable::IGNORE,
-                                            Node {
-                                                width: px(15.0),
-                                                height: px(15.0),
-                                                min_width: px(15.0),
-                                                min_height: px(15.0),
-                                                flex_shrink: 0.0,
-                                                ..default()
-                                            },
-                                        ));
-                                    }
-                                    let mut txt = btn.spawn((
-                                        Text::new(caption),
-                                        TextFont::from_font_size(11.0),
-                                        text_col,
-                                        Pickable::IGNORE,
-                                    ));
-                                    if is_rename {
-                                        txt.insert(RenameButtonText);
-                                    }
-                                });
-                        }
-                    });
-
-                    // Craft Library Drawer
+                    // Craft Library Drawer (presets + saved crafts)
                     body.spawn((
                         EditorCraftLibraryBox,
                         Node {
@@ -586,11 +799,27 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
                         uniform_border(Color::srgba(0.32, 0.72, 0.92, 0.5)),
                     ))
                     .with_children(|drawer| {
-                        drawer.spawn((
-                            Text::new("SAVED CRAFTS LIBRARY"),
-                            TextFont::from_font_size(11.0),
-                            TextColor(Color::srgb(0.32, 0.88, 1.0)),
-                        ));
+                        drawer.spawn(label_text("CRAFT LIBRARY", 11.0, UI_ACCENT));
+                        drawer
+                            .spawn(Node {
+                                flex_direction: FlexDirection::Row,
+                                column_gap: px(4.0),
+                                ..default()
+                            })
+                            .with_children(|row| {
+                                for (label, tip, action) in [
+                                    ("Preset: Selene", "Load the lunar-capable Selene Explorer III", AttachAction::LoadLunarPreset),
+                                    ("Preset: Kepler-I", "Load the two-stage Kepler-I orbital rocket", AttachAction::ResetStarter),
+                                ] {
+                                    let mut b = text_button(row, label, tip, Some(150.0));
+                                    bind_action(&mut b, action);
+                                    if let Some(h) = icons.ui_icons.get(&UiIconKind::RocketPreset) {
+                                        let handle = h.clone();
+                                        b.with_children(|c| spawn_icon(c, handle, 14.0));
+                                    }
+                                }
+                            });
+                        drawer.spawn(label_text("SAVED CRAFTS", 11.0, UI_ACCENT));
                         drawer.spawn((
                             EditorCraftList,
                             ScrollArea,
@@ -604,10 +833,10 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
                         ));
                     });
 
-                    body.spawn((
-                        Text::new("STAGE STACK (Click part to select, ^/v to shift)"),
-                        TextFont::from_font_size(11.0),
-                        TextColor(Color::srgb(0.32, 0.88, 1.0)),
+                    body.spawn(label_text(
+                        "STAGE STACK (click to select, ^/v to shift stage)",
+                        11.0,
+                        UI_ACCENT,
                     ));
 
                     body.spawn((
@@ -621,60 +850,30 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
                 });
 
             // Pinned Launch Button at bottom
-            parent
-                .spawn((
-                    Button,
-                    Hovered::default(),
-                    LaunchButtonMarker,
-                    Node {
-                        padding: UiRect::axes(px(10.0), px(8.0)),
-                        column_gap: px(6.0),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        border: UiRect::all(px(1.0)),
-                        border_radius: BorderRadius::all(CornerRadius::circular(px(5.0))),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgba(0.10, 0.45, 0.30, 0.96)),
-                    uniform_border(Color::srgba(0.28, 0.96, 0.62, 0.9)),
-                ))
-                .observe(
-                    |_act: On<'_, '_, Activate>,
-                     catalog: Res<'_, LivePartCatalog>,
-                     mut active_bp: ResMut<'_, ActiveBlueprint>,
-                     mut ed_state: ResMut<'_, EditorState>,
-                     mut next_mode: ResMut<'_, NextState<GameMode>>| {
-                        apply_editor_action(
-                            AttachAction::Launch,
-                            &catalog,
-                            &mut active_bp,
-                            &mut ed_state,
-                            &mut next_mode,
-                        );
-                    },
-                )
-                .with_children(|btn| {
-                    if let Some(handle) = icons.ui_icons.get(&UiIconKind::Launch) {
-                        btn.spawn((
-                            ImageNode::new(handle.clone()),
-                            Pickable::IGNORE,
-                            Node {
-                                width: px(16.0),
-                                height: px(16.0),
-                                min_width: px(16.0),
-                                min_height: px(16.0),
-                                flex_shrink: 0.0,
-                                ..default()
-                            },
-                        ));
-                    }
-                    btn.spawn((
-                        Text::new("LAUNCH TO PAD [Enter]"),
-                        TextFont::from_font_size(13.0),
-                        text_col,
-                        Pickable::IGNORE,
-                    ));
-                });
+            let mut launch = parent.spawn((
+                Button,
+                Hovered::default(),
+                LaunchButtonMarker,
+                Tooltip(String::from("Roll out to the launch pad [Enter]")),
+                Node {
+                    padding: UiRect::axes(px(10.0), px(10.0)),
+                    column_gap: px(6.0),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    border: UiRect::all(px(1.0)),
+                    border_radius: BorderRadius::all(CornerRadius::circular(px(5.0))),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.10, 0.45, 0.30, 0.96)),
+                uniform_border(Color::srgba(0.28, 0.96, 0.62, 0.9)),
+            ));
+            bind_action(&mut launch, AttachAction::Launch);
+            launch.with_children(|btn| {
+                if let Some(handle) = icons.ui_icons.get(&UiIconKind::Launch) {
+                    spawn_icon(btn, handle.clone(), 16.0);
+                }
+                btn.spawn(label_text("LAUNCH TO PAD [Enter]", 13.0, UI_TEXT));
+            });
         });
 }
 
@@ -730,6 +929,16 @@ fn spawn_category_tab(
     });
 }
 
+fn short_name(name: &str) -> String {
+    const MAX: usize = 13;
+    if name.chars().count() <= MAX {
+        name.to_owned()
+    } else {
+        let cut: String = name.chars().take(MAX - 1).collect();
+        format!("{cut}.")
+    }
+}
+
 fn rebuild_palette_grid_if_dirty(
     mut commands: Commands<'_, '_>,
     mut ed_state: ResMut<'_, EditorState>,
@@ -766,9 +975,10 @@ fn rebuild_palette_grid_if_dirty(
                 Button,
                 Hovered::default(),
                 PaletteButton(spec.id.clone()),
+                Tooltip(part_summary(spec)),
                 Node {
-                    width: px(80.0),
-                    height: px(84.0),
+                    width: px(84.0),
+                    height: px(100.0),
                     padding: UiRect::all(px(4.0)),
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
@@ -787,25 +997,14 @@ fn rebuild_palette_grid_if_dirty(
             )
             .with_children(|tile| {
                 if let Some(icon_h) = icons.part_icons.get(&spec.id) {
-                    tile.spawn((
-                        ImageNode::new(icon_h.clone()),
-                        Pickable::IGNORE,
-                        Node {
-                            width: px(56.0),
-                            height: px(56.0),
-                            min_width: px(56.0),
-                            min_height: px(56.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },
-                    ));
+                    spawn_icon(tile, icon_h.clone(), 52.0);
                 }
-                tile.spawn((
-                    Text::new(badge),
-                    TextFont::from_font_size(10.0),
-                    TextColor(Color::srgba(0.76, 0.92, 1.0, 0.9)),
-                    Pickable::IGNORE,
+                tile.spawn(label_text(
+                    short_name(&spec.display_name),
+                    9.5,
+                    Color::srgb(0.88, 0.96, 1.0),
                 ));
+                tile.spawn(label_text(badge, 9.5, Color::srgba(0.76, 0.92, 1.0, 0.75)));
             });
         }
     });
@@ -1184,6 +1383,7 @@ fn handle_palette_press_for_drag(
 fn handle_editor_canvas_drag_and_drop(
     mut commands: Commands<'_, '_>,
     ctx: EditorContext<'_, '_>,
+    mut zoom: ResMut<'_, CameraZoomState>,
     mut active_bp: ResMut<'_, ActiveBlueprint>,
     mut ed_state: ResMut<'_, EditorState>,
     mut node_q: Query<'_, '_, (&EditorPartNode, &mut Transform)>,
@@ -1199,31 +1399,81 @@ fn handle_editor_canvas_drag_and_drop(
         return;
     };
     let Some(cursor) = window.cursor_position() else {
+        ed_state.hover_part = None;
         return;
     };
-    let in_canvas = cursor.x > PALETTE_PANEL_WIDTH + 18.0
+    let over_ui = is_pointer_over_interactive_ui(&ctx.hover_map, &ctx.ui_nodes);
+    let in_canvas = !over_ui
+        && cursor.x > PALETTE_PANEL_WIDTH + 18.0
         && cursor.x < window.width() - INSPECTOR_PANEL_WIDTH - 18.0;
     let Ok(world_pos) = camera.viewport_to_world_2d(cam_xform, cursor) else {
         return;
     };
     let world_d = DVec2::new(f64::from(world_pos.x), f64::from(world_pos.y));
-    let bypass_snap = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let bypass_snap = shift || !ed_state.snap_nodes;
+    let carrying = matches!(ed_state.drag, DragPhase::Carrying { .. });
+    // The snap capture radius is constant on screen, so it feels the same at every zoom level.
+    let snap_radius = (SNAP_RADIUS_PX * f64::from(zoom.log_scale.exp())).clamp(0.6, 2.4);
 
-    if mouse_buttons.just_pressed(MouseButton::Left)
-        && in_canvas
-        && let Some(hit_id) = pick_part_at(&active_bp, &ctx.catalog, world_d)
+    ed_state.hover_part = if in_canvas {
+        pick_part_at(&active_bp, &ctx.catalog, world_d)
+    } else {
+        None
+    };
+
+    // Escape drops whatever is in hand.
+    if carrying && keys.just_pressed(KeyCode::Escape) {
+        ed_state.drag = DragPhase::Idle;
+        ed_state.snap_preview = None;
+        ed_state.status_note = String::from("Placement cancelled.");
+        despawn_ghosts(&mut commands, &ghost_q);
+        return;
+    }
+
+    // Right button: cancel carrying, or (as a click without dragging) delete the part under it.
+    if mouse_buttons.just_pressed(MouseButton::Right) {
+        if carrying {
+            ed_state.drag = DragPhase::Idle;
+            ed_state.snap_preview = None;
+            ed_state.right_press = None;
+            ed_state.status_note = String::from("Placement cancelled.");
+            despawn_ghosts(&mut commands, &ghost_q);
+            return;
+        }
+        ed_state.right_press = in_canvas.then_some(cursor);
+    }
+    if mouse_buttons.just_released(MouseButton::Right)
+        && let Some(start) = ed_state.right_press.take()
+        && cursor.distance(start) < CLICK_SLOP_PX
+        && matches!(ed_state.drag, DragPhase::Idle)
+        && let Some(hit) = ed_state.hover_part
     {
-        active_bp.selected_part_id = Some(hit_id);
-        ed_state.lists_dirty = true;
-        let alt_clone = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-        let ctrl_single = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-        ed_state.drag = DragPhase::PendingExisting {
-            part_id: hit_id,
-            start_cursor: cursor,
-            start_world: world_d,
-            alt_clone,
-            ctrl_single,
-        };
+        active_bp.selected_part_id = Some(hit);
+        delete_selected(&mut active_bp, &mut ed_state);
+    }
+
+    if mouse_buttons.just_pressed(MouseButton::Left) && in_canvas && !carrying {
+        if let Some(hit_id) = ed_state.hover_part {
+            active_bp.selected_part_id = Some(hit_id);
+            ed_state.lists_dirty = true;
+            let alt_clone = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+            let ctrl_single =
+                keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+            ed_state.drag = DragPhase::PendingExisting {
+                part_id: hit_id,
+                start_cursor: cursor,
+                start_world: world_d,
+                alt_clone,
+                ctrl_single,
+            };
+        } else if matches!(ed_state.drag, DragPhase::Idle) {
+            ed_state.drag = DragPhase::PanningCanvas {
+                start_cursor: cursor,
+                start_pan: zoom.editor_pan,
+                moved: false,
+            };
+        }
     }
 
     let phase = ed_state.drag.clone();
@@ -1232,22 +1482,64 @@ fn handle_editor_canvas_drag_and_drop(
             ed_state.snap_preview = None;
             despawn_ghosts(&mut commands, &ghost_q);
         }
+        DragPhase::PanningCanvas {
+            start_cursor,
+            start_pan,
+            moved,
+        } => {
+            if mouse_buttons.pressed(MouseButton::Left) {
+                let delta = cursor - start_cursor;
+                let moved_now = moved || delta.length() > DRAG_THRESHOLD_PX;
+                if moved_now {
+                    let scale = zoom.log_scale.exp();
+                    zoom.editor_pan = (start_pan + Vec2::new(-delta.x * scale, delta.y * scale))
+                        .clamp(Vec2::splat(-60.0), Vec2::splat(60.0));
+                }
+                ed_state.drag = DragPhase::PanningCanvas {
+                    start_cursor,
+                    start_pan,
+                    moved: moved_now,
+                };
+            } else {
+                if !moved {
+                    active_bp.selected_part_id = None;
+                    ed_state.lists_dirty = true;
+                }
+                ed_state.drag = DragPhase::Idle;
+            }
+        }
         DragPhase::PendingPalette {
             spec_id,
             start_cursor,
         } => {
             if !mouse_buttons.pressed(MouseButton::Left) {
-                ed_state.drag = DragPhase::Idle;
+                // A plain click on a catalog tile picks the part up; click the bay to place it.
+                let name = ctx
+                    .catalog
+                    .sim_catalog
+                    .get(&spec_id)
+                    .map_or_else(|| spec_id.clone(), |s| s.display_name.clone());
+                ed_state.status_note =
+                    format!("Carrying {name}. Click the bay to place it (Shift: keep placing).");
+                ed_state.drag = DragPhase::Carrying { spec_id };
                 ed_state.snap_preview = None;
             } else if cursor.distance(start_cursor) > DRAG_THRESHOLD_PX {
                 ed_state.drag = DragPhase::DraggingNew { spec_id };
             }
         }
-        DragPhase::DraggingNew { spec_id } => {
-            let snap = if bypass_snap {
+        DragPhase::DraggingNew { spec_id } | DragPhase::Carrying { spec_id } => {
+            let show_ghost = !carrying || in_canvas;
+            let snap = if bypass_snap || !show_ghost {
                 None
             } else {
-                find_best_snap_target(&active_bp, &ctx.catalog, &spec_id, world_d, None)
+                find_best_snap_target(
+                    &active_bp,
+                    &ctx.catalog,
+                    &spec_id,
+                    world_d,
+                    None,
+                    snap_radius,
+                )
             };
             let free_target = find_free_target(&active_bp, world_d);
             let preview_pos = snap
@@ -1264,7 +1556,13 @@ fn handle_editor_canvas_drag_and_drop(
                 .map_or(0.0, part_style_id);
             ed_state.snap_preview = snap.as_ref().map(|s| s.local_pos);
 
-            if mouse_buttons.just_released(MouseButton::Left) {
+            let place_now = if carrying {
+                mouse_buttons.just_pressed(MouseButton::Left) && in_canvas
+            } else {
+                mouse_buttons.just_released(MouseButton::Left)
+            };
+
+            if place_now {
                 if in_canvas && let Some(target) = snap.or(free_target) {
                     ed_state.record_undo(&active_bp.blueprint);
                     let new_id = attach_with_optional_symmetry(
@@ -1278,24 +1576,30 @@ fn handle_editor_canvas_drag_and_drop(
                     active_bp.dirty = true;
                     ed_state.status_note = format!("Placed {spec_id}.");
                 }
-                ed_state.drag = DragPhase::Idle;
+                ed_state.drag = if carrying && shift {
+                    DragPhase::Carrying { spec_id }
+                } else {
+                    DragPhase::Idle
+                };
                 ed_state.snap_preview = None;
                 despawn_ghosts(&mut commands, &ghost_q);
             } else {
                 despawn_ghosts(&mut commands, &ghost_q);
-                spawn_drag_ghost(
-                    &mut commands,
-                    &ctx.catalog,
-                    &spec_id,
-                    DragGhostPose {
-                        pos: preview_pos,
-                        rot: preview_rot,
-                        mirrored,
-                        snapped: snap.is_some(),
-                        style_id,
-                    },
-                    &mut assets,
-                );
+                if show_ghost {
+                    spawn_drag_ghost(
+                        &mut commands,
+                        &ctx.catalog,
+                        &spec_id,
+                        DragGhostPose {
+                            pos: preview_pos,
+                            rot: preview_rot,
+                            mirrored,
+                            snapped: snap.is_some(),
+                            style_id,
+                        },
+                        &mut assets,
+                    );
+                }
             }
         }
         DragPhase::PendingExisting {
@@ -1367,7 +1671,8 @@ fn handle_editor_canvas_drag_and_drop(
                 .parts
                 .iter()
                 .find(|p| p.instance_id == part_id)
-                .map_or_default(|p| p.spec_id.clone());
+                .map(|p| p.spec_id.clone())
+                .unwrap_or_default();
 
             let curr_pos = active_bp
                 .blueprint
@@ -1378,14 +1683,21 @@ fn handle_editor_canvas_drag_and_drop(
             let snap = if is_root || bypass_snap {
                 None
             } else {
-                find_best_snap_target(&active_bp, &ctx.catalog, &spec_id, curr_pos, Some(part_id))
+                find_best_snap_target(
+                    &active_bp,
+                    &ctx.catalog,
+                    &spec_id,
+                    curr_pos,
+                    Some(part_id),
+                    snap_radius,
+                )
             };
             ed_state.snap_preview = snap.as_ref().map(|s| s.local_pos);
 
             if mouse_buttons.just_released(MouseButton::Left) {
                 if let Some(target) = snap {
-                    let shift = target.local_pos - curr_pos;
-                    active_bp.blueprint.translate_subtree(part_id, shift);
+                    let shift_vec = target.local_pos - curr_pos;
+                    active_bp.blueprint.translate_subtree(part_id, shift_vec);
                     if let Some(p) = active_bp
                         .blueprint
                         .parts
@@ -1560,10 +1872,10 @@ fn find_best_snap_target(
     new_spec_id: &str,
     cursor_m: DVec2,
     moving_subtree_root: Option<u64>,
+    snap_radius: f64,
 ) -> Option<SnapTarget> {
     let new_spec = catalog.sim_catalog.get(new_spec_id)?;
     let mut best: Option<(f64, SnapTarget)> = None;
-    let snap_radius = 1.45;
 
     for parent in &bp.blueprint.parts {
         if let Some(root_id) = moving_subtree_root
@@ -1806,8 +2118,18 @@ fn handle_editor_keyboard_shortcuts(
         Some(AttachAction::Undo)
     } else if ctrl && keys.just_pressed(KeyCode::KeyY) {
         Some(AttachAction::Redo)
+    } else if ctrl && keys.just_pressed(KeyCode::KeyS) {
+        Some(AttachAction::SaveCraft)
+    } else if ctrl && keys.just_pressed(KeyCode::KeyD) {
+        Some(AttachAction::DuplicateSelected)
+    } else if ctrl {
+        None
     } else if keys.just_pressed(KeyCode::KeyF) {
         Some(AttachAction::FlipMirror)
+    } else if keys.just_pressed(KeyCode::KeyA) {
+        Some(AttachAction::AutoAttach)
+    } else if keys.just_pressed(KeyCode::KeyS) {
+        Some(AttachAction::ToggleSnap)
     } else if keys.just_pressed(KeyCode::KeyB) {
         Some(AttachAction::AttachBottom)
     } else if keys.just_pressed(KeyCode::KeyT) {
@@ -1869,7 +2191,16 @@ fn apply_editor_action(
         }
         AttachAction::AttachRadialPair => {
             ed_state.record_undo(&active_bp.blueprint);
-            attach_radial_pair(active_bp, catalog);
+            attach_radial_pair(active_bp, catalog, true);
+        }
+        AttachAction::AutoAttach => auto_attach(active_bp, catalog, ed_state),
+        AttachAction::ToggleSnap => {
+            ed_state.snap_nodes = !ed_state.snap_nodes;
+            ed_state.status_note = if ed_state.snap_nodes {
+                String::from("Node snapping ON.")
+            } else {
+                String::from("Node snapping OFF - parts place freely on the grid.")
+            };
         }
         AttachAction::ToggleSymmetry => {
             ed_state.symmetry_2x = !ed_state.symmetry_2x;
@@ -1996,25 +2327,7 @@ fn apply_editor_action(
                 active_bp.dirty = true;
             }
         }
-        AttachAction::DeleteSelected => {
-            if let Some(sel) = active_bp.selected_part_id {
-                ed_state.record_undo(&active_bp.blueprint);
-                let twin = if ed_state.symmetry_2x {
-                    active_bp.blueprint.find_mirror_twin(sel)
-                } else {
-                    None
-                };
-                let removed = active_bp.blueprint.remove_subtree(sel);
-                if let Some(tid) = twin {
-                    active_bp.blueprint.remove_subtree(tid);
-                }
-                if removed {
-                    active_bp.selected_part_id =
-                        active_bp.blueprint.parts.first().map(|p| p.instance_id);
-                    active_bp.dirty = true;
-                }
-            }
-        }
+        AttachAction::DeleteSelected => delete_selected(active_bp, ed_state),
         AttachAction::LoadLunarPreset => {
             ed_state.record_undo(&active_bp.blueprint);
             active_bp.blueprint = lunar_capable_blueprint(&catalog.sim_catalog);
@@ -2102,7 +2415,7 @@ fn attach_to_selected(
     active_bp.dirty = true;
 }
 
-fn attach_radial_pair(active_bp: &mut ActiveBlueprint, catalog: &LivePartCatalog) {
+fn attach_radial_pair(active_bp: &mut ActiveBlueprint, catalog: &LivePartCatalog, pair: bool) {
     let Some(parent_id) = active_bp.selected_part_id else {
         return;
     };
@@ -2134,16 +2447,206 @@ fn attach_radial_pair(active_bp: &mut ActiveBlueprint, catalog: &LivePartCatalog
         0.0,
         parent_part.stage,
     );
-    active_bp.blueprint.attach_child(
-        parent_id,
-        new_spec.id.clone(),
-        AttachKind::RadialRight,
-        right_pos,
-        0.0,
-        parent_part.stage,
-    );
+    if pair {
+        active_bp.blueprint.attach_child(
+            parent_id,
+            new_spec.id.clone(),
+            AttachKind::RadialRight,
+            right_pos,
+            0.0,
+            parent_part.stage,
+        );
+    }
     active_bp.selected_part_id = Some(new_left);
     active_bp.dirty = true;
+}
+
+/// Deletes the selected part (and everything attached to it). The root cannot be deleted.
+fn delete_selected(active_bp: &mut ActiveBlueprint, ed_state: &mut EditorState) {
+    let Some(sel) = active_bp.selected_part_id else {
+        return;
+    };
+    let is_root = active_bp
+        .blueprint
+        .parts
+        .iter()
+        .find(|p| p.instance_id == sel)
+        .is_some_and(|p| p.parent_id.is_none());
+    if is_root {
+        ed_state.status_note =
+            String::from("The root part can't be deleted - drag it to move the whole rocket.");
+        return;
+    }
+    ed_state.record_undo(&active_bp.blueprint);
+    let twin = if ed_state.symmetry_2x {
+        active_bp.blueprint.find_mirror_twin(sel)
+    } else {
+        None
+    };
+    let before = active_bp.blueprint.parts.len();
+    active_bp.blueprint.remove_subtree(sel);
+    if let Some(tid) = twin {
+        active_bp.blueprint.remove_subtree(tid);
+    }
+    let removed = before - active_bp.blueprint.parts.len();
+    active_bp.selected_part_id = active_bp.blueprint.parts.first().map(|p| p.instance_id);
+    active_bp.dirty = true;
+    ed_state.status_note = format!("Deleted {removed} part(s). Ctrl+Z to undo.");
+}
+
+/// One-click building: attach the brush to the selected part's next free node.
+fn auto_attach(
+    active_bp: &mut ActiveBlueprint,
+    catalog: &LivePartCatalog,
+    ed_state: &mut EditorState,
+) {
+    let Some(sel) = active_bp.selected_part_id else {
+        ed_state.status_note = String::from("Select a part first, then Auto-attach.");
+        return;
+    };
+    let Some(parent) = active_bp
+        .blueprint
+        .parts
+        .iter()
+        .find(|p| p.instance_id == sel)
+        .cloned()
+    else {
+        return;
+    };
+    let (Some(pspec), Some(new_spec)) = (
+        catalog.sim_catalog.get(&parent.spec_id),
+        catalog.sim_catalog.get(&active_bp.active_palette_spec),
+    ) else {
+        return;
+    };
+    let has_child = |bp: &VesselBlueprint, kind: AttachKind| {
+        bp.parts
+            .iter()
+            .any(|p| p.parent_id == Some(sel) && p.attach_kind == kind)
+    };
+    let sym = ed_state.symmetry_2x;
+    let radial_only = new_spec.radial_attach && !new_spec.stack_top && !new_spec.stack_bottom;
+    let name = new_spec.display_name.clone();
+
+    if radial_only {
+        ed_state.record_undo(&active_bp.blueprint);
+        attach_radial_pair(active_bp, catalog, sym);
+    } else if pspec.stack_bottom
+        && new_spec.stack_top
+        && !has_child(&active_bp.blueprint, AttachKind::StackBottom)
+    {
+        ed_state.record_undo(&active_bp.blueprint);
+        attach_to_selected(active_bp, catalog, AttachKind::StackBottom);
+    } else if pspec.stack_top
+        && new_spec.stack_bottom
+        && !has_child(&active_bp.blueprint, AttachKind::StackTop)
+    {
+        ed_state.record_undo(&active_bp.blueprint);
+        attach_to_selected(active_bp, catalog, AttachKind::StackTop);
+    } else if new_spec.radial_attach {
+        ed_state.record_undo(&active_bp.blueprint);
+        attach_radial_pair(active_bp, catalog, sym);
+    } else {
+        ed_state.status_note = format!("No free node on the selected part for {name}.");
+        return;
+    }
+    ed_state.status_note = format!("Attached {name}.");
+}
+
+/// Keeps the floating toolbar glued above the selected part (hidden while dragging).
+fn update_selection_toolbar(
+    ed_state: Res<'_, EditorState>,
+    active_bp: Res<'_, ActiveBlueprint>,
+    catalog: Res<'_, LivePartCatalog>,
+    windows: Query<'_, '_, &Window>,
+    cam_q: Query<'_, '_, (&Camera, &GlobalTransform), With<MainCamera>>,
+    mut bar_q: Query<'_, '_, &mut Node, With<SelectionToolbar>>,
+    mut cf_q: Query<'_, '_, &mut Node, (With<CrossfeedToolButton>, Without<SelectionToolbar>)>,
+) {
+    let Ok(mut bar) = bar_q.single_mut() else {
+        return;
+    };
+    let hide = |bar: &mut Node| bar.display = Display::None;
+
+    if !matches!(ed_state.drag, DragPhase::Idle) {
+        hide(&mut bar);
+        return;
+    }
+    let (Ok(window), Ok((camera, cam_xform))) = (windows.single(), cam_q.single()) else {
+        hide(&mut bar);
+        return;
+    };
+    let Some(part) = active_bp.selected_part_id.and_then(|id| {
+        active_bp
+            .blueprint
+            .parts
+            .iter()
+            .find(|p| p.instance_id == id)
+    }) else {
+        hide(&mut bar);
+        return;
+    };
+    let Some(spec) = catalog.sim_catalog.get(&part.spec_id) else {
+        hide(&mut bar);
+        return;
+    };
+
+    let half = spec.shape.contact_half_extent();
+    let top_world = Vec3::new(
+        part.local_pos.x as f32,
+        (part.local_pos.y + half.y + 0.2) as f32,
+        0.0,
+    );
+    let bottom_world = Vec3::new(
+        part.local_pos.x as f32,
+        (part.local_pos.y - half.y - 0.2) as f32,
+        0.0,
+    );
+    let (Ok(top_vp), Ok(bottom_vp)) = (
+        camera.world_to_viewport(cam_xform, top_world),
+        camera.world_to_viewport(cam_xform, bottom_world),
+    ) else {
+        hide(&mut bar);
+        return;
+    };
+
+    let min_x = PALETTE_PANEL_WIDTH + 24.0;
+    let max_x = (window.width() - INSPECTOR_PANEL_WIDTH - 24.0 - TOOLBAR_W).max(min_x);
+    let x = (top_vp.x - TOOLBAR_W * 0.5).clamp(min_x, max_x);
+    let above = top_vp.y - TOOLBAR_H - 8.0;
+    let y = if above >= TOP_BAR_CLEARANCE {
+        above
+    } else {
+        (bottom_vp.y + 8.0).min(window.height() - TOOLBAR_H - 56.0)
+    };
+    bar.left = px(x);
+    bar.top = px(y);
+    bar.display = Display::Flex;
+
+    let is_decoupler = matches!(spec.kind, PartKind::Decoupler(_));
+    for mut cf in &mut cf_q {
+        cf.display = if is_decoupler {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+}
+
+fn draw_part_outline(gizmos: &mut Gizmos<'_, '_>, part: &PlacedPart, half: DVec2, color: Color) {
+    let corners = [
+        DVec2::new(-half.x, -half.y),
+        DVec2::new(half.x, -half.y),
+        DVec2::new(half.x, half.y),
+        DVec2::new(-half.x, half.y),
+    ];
+    let to_world = |c: DVec2| {
+        let w = part.local_pos + c.rotate(part.local_rot);
+        Vec2::new(w.x as f32, w.y as f32)
+    };
+    for i in 0..4 {
+        gizmos.line_2d(to_world(corners[i]), to_world(corners[(i + 1) % 4]), color);
+    }
 }
 
 #[inline]
@@ -2161,6 +2664,24 @@ fn draw_editor_gizmos(
     mut gizmos: Gizmos<'_, '_>,
 ) {
     let analysis = analyze_blueprint(&active_bp.blueprint, &catalog.sim_catalog);
+
+    // Outline the part under the cursor so hovering gives instant feedback before clicking.
+    if matches!(ed_state.drag, DragPhase::Idle)
+        && let Some(hid) = ed_state.hover_part
+        && let Some(part) = active_bp
+            .blueprint
+            .parts
+            .iter()
+            .find(|p| p.instance_id == hid)
+        && let Some(spec) = catalog.sim_catalog.get(&part.spec_id)
+    {
+        let color = if active_bp.selected_part_id == Some(hid) {
+            BORDER_ON
+        } else {
+            Color::srgba(0.70, 0.90, 1.0, 0.9)
+        };
+        draw_part_outline(&mut gizmos, part, spec.shape.contact_half_extent(), color);
+    }
 
     let grid_col = Color::srgba(0.14, 0.30, 0.44, 0.24);
     for ix in -16..=16 {
@@ -2232,6 +2753,53 @@ fn draw_editor_gizmos(
     }
 }
 
+fn editor_hint(active_bp: &ActiveBlueprint, catalog: &LivePartCatalog, ed_state: &EditorState) -> String {
+    let name_of = |id: &str| {
+        catalog
+            .sim_catalog
+            .get(id)
+            .map_or_else(|| id.to_owned(), |s| s.display_name.clone())
+    };
+    match &ed_state.drag {
+        DragPhase::Carrying { spec_id } => format!(
+            "Placing {} | Click: place (Shift: keep placing) | Right-click / Esc: cancel",
+            name_of(spec_id)
+        ),
+        DragPhase::DraggingNew { spec_id } => format!(
+            "Dropping {} | Release on a glowing node to snap, or anywhere to place freely",
+            name_of(spec_id)
+        ),
+        DragPhase::DraggingExisting { .. } => {
+            String::from("Moving | Release on a node to snap | Hold Shift to bypass snapping")
+        }
+        DragPhase::PendingPalette { .. }
+        | DragPhase::PendingExisting { .. }
+        | DragPhase::PanningCanvas { .. } => ed_state.status_note.clone(),
+        DragPhase::Idle => {
+            if let Some(id) = ed_state.hover_part
+                && let Some(part) = active_bp
+                    .blueprint
+                    .parts
+                    .iter()
+                    .find(|p| p.instance_id == id)
+            {
+                format!(
+                    "{} | Click: select | Drag: move | Ctrl+Drag: one part | Alt+Drag: clone | Right-click: delete",
+                    name_of(&part.spec_id)
+                )
+            } else if active_bp.selected_part_id.is_some() {
+                String::from(
+                    "Use the toolbar on the part (rotate, flip, copy, stage, delete) | Click empty space to deselect | Scroll: zoom",
+                )
+            } else {
+                String::from(
+                    "Pick a part on the left, then click the bay | Drag empty space: pan | Scroll: zoom to cursor",
+                )
+            }
+        }
+    }
+}
+
 fn update_editor_readouts_and_highlights(
     time: Res<'_, Time>,
     catalog: Res<'_, LivePartCatalog>,
@@ -2253,7 +2821,15 @@ fn update_editor_readouts_and_highlights(
     }
 
     for (pbtn, mut border) in &mut queries.palette_q {
-        *border = if pbtn.0 == active_bp.active_palette_spec {
+        let in_hand = match &ed_state.drag {
+            DragPhase::Carrying { spec_id } | DragPhase::DraggingNew { spec_id } => {
+                *spec_id == pbtn.0
+            }
+            _ => false,
+        };
+        *border = if in_hand {
+            uniform_border(BORDER_ON)
+        } else if pbtn.0 == active_bp.active_palette_spec {
             uniform_border(Color::srgba(0.28, 0.92, 1.0, 0.96))
         } else {
             uniform_border(Color::srgba(0.24, 0.52, 0.72, 0.45))
@@ -2268,27 +2844,49 @@ fn update_editor_readouts_and_highlights(
         };
     }
 
-    if let Ok(mut sym_txt) = queries.sym_text_q.single_mut() {
-        *sym_txt = Text::new(if ed_state.symmetry_2x {
-            "Symmetry: 2x MIRROR [X]  |  Scroll catalog"
-        } else {
-            "Symmetry: 1x SINGLE [X]  |  Scroll catalog"
-        });
+    for (toggle, mut border) in &mut queries.toggle_q {
+        let on = match toggle.0 {
+            ToggleKind::Symmetry => ed_state.symmetry_2x,
+            ToggleKind::Snap => ed_state.snap_nodes,
+        };
+        *border = uniform_border(if on { BORDER_ON } else { BTN_BORDER });
     }
 
-    if let Ok(mut ren_txt) = queries.rename_text_q.single_mut() {
-        *ren_txt = Text::new(if ed_state.renaming_craft {
-            "Done Renaming [Enter]"
-        } else {
-            "Rename Craft"
-        });
-    }
-
-    if let Ok(mut text) = queries.readout_q.single_mut() {
-        let analysis = analyze_blueprint(&active_bp.blueprint, &catalog.sim_catalog);
-        *text = Text::new(format_analysis_text(
-            &active_bp, &catalog, &ed_state, &analysis,
-        ));
+    let analysis = analyze_blueprint(&active_bp.blueprint, &catalog.sim_catalog);
+    for (tag, mut text) in &mut queries.text_q {
+        let new_text = match tag {
+            EditorText::Readout => format_analysis_text(&active_bp, &catalog, &ed_state, &analysis),
+            EditorText::SymStatus => format!(
+                "Symmetry {} [X] | Node snap {} [S]",
+                if ed_state.symmetry_2x { "2x" } else { "1x" },
+                if ed_state.snap_nodes { "ON" } else { "OFF" }
+            ),
+            EditorText::CraftName => format!(
+                "{}{}",
+                active_bp.blueprint.name,
+                if ed_state.renaming_craft {
+                    "_  (Enter: done)"
+                } else {
+                    ""
+                }
+            ),
+            EditorText::SymLabel => String::from(if ed_state.symmetry_2x {
+                "Sym 2x"
+            } else {
+                "Sym 1x"
+            }),
+            EditorText::Brush => catalog
+                .sim_catalog
+                .get(&active_bp.active_palette_spec)
+                .map_or_else(
+                    || String::from("No part selected"),
+                    |s| format!("IN HAND: {}", part_summary(s)),
+                ),
+            EditorText::Hint => editor_hint(&active_bp, &catalog, &ed_state),
+        };
+        if text.0 != new_text {
+            text.0 = new_text;
+        }
     }
 }
 
@@ -2394,6 +2992,7 @@ impl Plugin for EditorPlugin {
                     handle_editor_keyboard_shortcuts,
                     rebuild_editor_meshes_if_dirty,
                     draw_editor_gizmos,
+                    update_selection_toolbar,
                     update_editor_readouts_and_highlights,
                 )
                     .chain()

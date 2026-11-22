@@ -37,6 +37,7 @@ mod procedural_mesh;
 mod save_io;
 mod shaders;
 mod state;
+mod ui_kit;
 
 fn main() {
     App::new()
@@ -59,6 +60,7 @@ fn main() {
         .init_state::<state::GameMode>()
         .add_plugins((
             state::StatePlugin,
+            ui_kit::UiKitPlugin,
             part_catalog::PartCatalogPlugin,
             part_icons::PartIconsPlugin,
             shaders::KeplerShadersPlugin,
