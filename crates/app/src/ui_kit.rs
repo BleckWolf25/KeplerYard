@@ -1,6 +1,6 @@
-//! @file ui_kit.rs
+//! @file `ui_kit.rs`
 //!
-//! @version 1.0.0
+//! @version 1.0.1
 //! @author `BleckWolf25`
 //! @license MIT
 //!

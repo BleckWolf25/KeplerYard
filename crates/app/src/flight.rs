@@ -1,6 +1,6 @@
 //! @file flight.rs
 //!
-//! @version 1.3.0
+//! @version 1.3.1
 //! @author `BleckWolf25`
 //! @license MIT
 //!
@@ -303,8 +303,7 @@ fn enter_flight(
 
     let pred = world
         .active_vessel_id
-        .map(|id| world.predict_trajectory_with_plan(id, PredictionOptions::default(), None))
-        .unwrap_or_default();
+        .map_or_default(|id| world.predict_trajectory_with_plan(id, PredictionOptions::default(), None));
 
     commands.insert_resource(FlightSimState {
         world,
@@ -898,12 +897,11 @@ fn step_flight_controls_and_physics(
         flight.last_prediction = flight
             .world
             .active_vessel_id
-            .map(|id| {
+            .map_or_default(|id| {
                 flight
                     .world
                     .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
-            })
-            .unwrap_or_default();
+            });
     }
 }
 

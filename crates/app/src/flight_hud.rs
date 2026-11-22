@@ -1,6 +1,6 @@
 //! @file `flight_hud.rs`
 //!
-//! @version 1.1.0
+//! @version 1.1.1
 //! @author `BleckWolf25`
 //! @license MIT
 //!
@@ -70,10 +70,10 @@ pub struct RecoverButtonMarker;
 pub struct FlightMapBadge(pub usize);
 
 #[derive(Component)]
-pub(crate) struct ThrottleThumb;
+pub struct ThrottleThumb;
 
 #[derive(Component)]
-pub(crate) struct ThrottlePercentText;
+pub struct ThrottlePercentText;
 
 #[derive(Clone, Copy)]
 pub enum FlightUiAction {
@@ -580,7 +580,7 @@ fn spawn_throttle_slider(parent: &mut ChildSpawnerCommands<'_>) {
 /// Keeps the throttle slider's thumb position, value, and readout in sync with the sim, in
 /// either direction: dragging the slider sets throttle (via `ValueChange`'s observer), and
 /// keyboard throttle changes move the slider back to match.
-pub(crate) fn sync_throttle_slider(
+pub fn sync_throttle_slider(
     flight: Res<'_, FlightSimState>,
     mut commands: Commands<'_, '_>,
     slider_q: Query<'_, '_, (Entity, &SliderValue), With<Slider>>,

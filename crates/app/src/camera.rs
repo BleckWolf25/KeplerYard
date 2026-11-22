@@ -1,6 +1,6 @@
 //! @file camera.rs
 //!
-//! @version 1.2.0
+//! @version 1.2.1
 //! @author `BleckWolf25`
 //! @license MIT
 //!
@@ -91,6 +91,28 @@ fn on_enter_flight(mut zoom: ResMut<'_, CameraZoomState>, mut focus: ResMut<'_, 
     focus.target = CameraFocusTarget::ActiveVessel;
 }
 
+fn read_scroll_delta(input: &mut CameraInput<'_, '_>, over_ui: bool) -> (f32, bool) {
+    let mut scroll_delta = 0.0_f32;
+    let mut wheel_used = false;
+    for ev in input.wheel.read() {
+        if !over_ui {
+            let normalized = match ev.unit {
+                MouseScrollUnit::Line => ev.y,
+                MouseScrollUnit::Pixel => ev.y / 28.0,
+            };
+            scroll_delta += normalized;
+            wheel_used = true;
+        }
+    }
+    if input.keys.pressed(KeyCode::Equal) || input.keys.pressed(KeyCode::NumpadAdd) {
+        scroll_delta += 0.35;
+    }
+    if input.keys.pressed(KeyCode::Minus) || input.keys.pressed(KeyCode::NumpadSubtract) {
+        scroll_delta -= 0.35;
+    }
+    (scroll_delta.clamp(-2.5, 2.5), wheel_used)
+}
+
 pub fn is_pointer_over_interactive_ui(
     hover_map: &HoverMap,
     ui_nodes: &Query<'_, '_, Option<&Pickable>, With<Node>>,
@@ -113,27 +135,8 @@ fn update_camera_zoom_and_pan(
 ) {
     let over_ui = is_pointer_over_interactive_ui(&input.hover_map, &input.ui_nodes);
 
-    let mut scroll_delta = 0.0_f32;
-    let mut wheel_used = false;
-    for ev in input.wheel.read() {
-        if !over_ui {
-            let normalized = match ev.unit {
-                MouseScrollUnit::Line => ev.y,
-                MouseScrollUnit::Pixel => ev.y / 28.0,
-            };
-            scroll_delta += normalized;
-            wheel_used = true;
-        }
-    }
+    let (scroll_delta, wheel_used) = read_scroll_delta(&mut input, over_ui);
     let old_scale = zoom.log_scale.exp();
-    if input.keys.pressed(KeyCode::Equal) || input.keys.pressed(KeyCode::NumpadAdd) {
-        scroll_delta += 0.35;
-    }
-    if input.keys.pressed(KeyCode::Minus) || input.keys.pressed(KeyCode::NumpadSubtract) {
-        scroll_delta -= 0.35;
-    }
-
-    scroll_delta = scroll_delta.clamp(-2.5, 2.5);
     if scroll_delta.abs() > 1.0e-4 {
         zoom.log_scale -= scroll_delta * 0.14;
     }

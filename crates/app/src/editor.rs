@@ -1,6 +1,6 @@
 //! @file editor.rs
 //!
-//! @version 2.0.0
+//! @version 2.0.1
 //! @author `BleckWolf25`
 //! @license MIT
 //!
@@ -1671,8 +1671,7 @@ fn handle_editor_canvas_drag_and_drop(
                 .parts
                 .iter()
                 .find(|p| p.instance_id == part_id)
-                .map(|p| p.spec_id.clone())
-                .unwrap_or_default();
+                .map_or_else(String::new, |p| p.spec_id.clone());
 
             let curr_pos = active_bp
                 .blueprint
