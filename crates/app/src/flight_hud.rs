@@ -1,6 +1,6 @@
 //! @file flight_hud.rs
 //!
-//! @version 1.2.0
+//! @version 1.3.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -43,6 +43,9 @@ const BADGE_SLOTS: usize = 7;
 
 #[derive(Component)]
 pub struct FlightHudText;
+
+#[derive(Component)]
+pub struct FlightMissionFeedbackText;
 
 #[derive(Component)]
 pub struct FlightNavText;
@@ -102,6 +105,7 @@ type PauseSummaryTextQuery<'w, 's> = Query<
         With<PauseSummaryText>,
         Without<FlightHudText>,
         Without<FlightNavText>,
+        Without<FlightMissionFeedbackText>,
     ),
 >;
 
@@ -113,6 +117,7 @@ type RecoverButtonQuery<'w, 's> = Query<
         With<RecoverButtonMarker>,
         Without<FlightPauseModal>,
         Without<FlightControlsText>,
+        Without<FlightMissionFeedbackText>,
     ),
 >;
 
@@ -130,11 +135,49 @@ type RcsToggleBorderQuery<'w, 's> = Query<
 #[derive(SystemParam)]
 #[allow(clippy::struct_field_names)]
 pub struct HudSyncQueries<'w, 's> {
-    pub hud_q: Query<'w, 's, &'static mut Text, With<FlightHudText>>,
-    pub nav_q: Query<'w, 's, &'static mut Text, (With<FlightNavText>, Without<FlightHudText>)>,
-    pub help_node_q: Query<'w, 's, &'static mut Node, With<FlightControlsText>>,
-    pub modal_node_q:
-        Query<'w, 's, &'static mut Node, (With<FlightPauseModal>, Without<FlightControlsText>)>,
+    pub hud_q:
+        Query<'w, 's, &'static mut Text, (With<FlightHudText>, Without<FlightMissionFeedbackText>)>,
+    pub mission_feedback_q: Query<
+        'w,
+        's,
+        (&'static mut Text, &'static mut Node),
+        (
+            With<FlightMissionFeedbackText>,
+            Without<FlightHudText>,
+            Without<FlightNavText>,
+            Without<FlightControlsText>,
+            Without<FlightPauseModal>,
+            Without<RecoverButtonMarker>,
+            Without<FlightMapBadge>,
+            Without<PauseSummaryText>,
+        ),
+    >,
+    pub nav_q: Query<
+        'w,
+        's,
+        &'static mut Text,
+        (
+            With<FlightNavText>,
+            Without<FlightHudText>,
+            Without<FlightMissionFeedbackText>,
+        ),
+    >,
+    pub help_node_q: Query<
+        'w,
+        's,
+        &'static mut Node,
+        (With<FlightControlsText>, Without<FlightMissionFeedbackText>),
+    >,
+    pub modal_node_q: Query<
+        'w,
+        's,
+        &'static mut Node,
+        (
+            With<FlightPauseModal>,
+            Without<FlightControlsText>,
+            Without<FlightMissionFeedbackText>,
+        ),
+    >,
     pub modal_text_q: PauseSummaryTextQuery<'w, 's>,
     pub recover_btn_q: RecoverButtonQuery<'w, 's>,
     pub sas_mode_q: Query<'w, 's, (&'static SasModeButton, &'static mut BorderColor)>,
@@ -153,12 +196,14 @@ type FlightBadgeQuery<'w, 's> = Query<
         &'static mut TextColor,
     ),
     (
+        With<FlightMapBadge>,
         Without<FlightHudText>,
         Without<FlightNavText>,
         Without<PauseSummaryText>,
         Without<FlightPauseModal>,
         Without<FlightControlsText>,
         Without<RecoverButtonMarker>,
+        Without<FlightMissionFeedbackText>,
     ),
 >;
 
@@ -176,6 +221,29 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
     let panel_bg = BackgroundColor(Color::srgba(0.03, 0.06, 0.11, 0.88));
     let border = uniform_border(Color::srgba(0.20, 0.72, 0.94, 0.55));
     let text_col = TextColor(Color::srgb(0.88, 0.96, 1.0));
+
+    commands.spawn((
+        FlightEntity,
+        FlightMissionFeedbackText,
+        Node {
+            position_type: PositionType::Absolute,
+            left: percent(50.0),
+            top: px(46.0),
+            width: px(360.0),
+            margin: UiRect::left(px(-180.0)),
+            padding: UiRect::axes(px(14.0), px(8.0)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            border: UiRect::all(px(1.0)),
+            border_radius: BorderRadius::all(CornerRadius::circular(px(6.0))),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.02, 0.07, 0.12, 0.82)),
+        uniform_border(Color::srgba(0.32, 0.86, 1.0, 0.70)),
+        Text::new(""),
+        TextFont::from_font_size(15.0),
+        TextColor(Color::srgb(0.75, 0.94, 1.0)),
+    ));
 
     commands
         .spawn((
@@ -888,6 +956,15 @@ pub fn update_flight_hud_and_badges(
         *nav_txt = Text::new(format_navball_readout(flight));
     }
 
+    if let Ok((mut feedback_txt, mut feedback_node)) = hud.mission_feedback_q.single_mut() {
+        *feedback_txt = Text::new(flight.mission_feedback.clone());
+        feedback_node.display = if flight.mission_feedback.is_empty() {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
+
     if let Ok(mut help_node) = hud.help_node_q.single_mut() {
         help_node.display = if flight.show_controls_help {
             Display::Flex
@@ -1182,7 +1259,7 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
         v.name,
         body_name,
         status,
-        flight.world.time_s,
+        flight.mission_elapsed_s,
         clock.warp_factor(),
         warp_mode,
         alt_km,
@@ -1221,7 +1298,7 @@ fn format_mission_summary(flight: &FlightSimState) -> String {
          Peak Hull Temp: {:.0} K\n\
          Stages Fired: {}",
         outcome,
-        flight.world.time_s,
+        flight.mission_elapsed_s,
         flight.max_altitude_m / 1000.0,
         flight.max_speed_m_s,
         flight.max_temp_k,

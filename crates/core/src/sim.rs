@@ -1,6 +1,6 @@
 //! @file sim.rs
 //!
-//! @version 1.5.0
+//! @version 1.5.1
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -905,6 +905,8 @@ impl SimWorld {
             let mut max_rho = 0.0;
             let mut rel_vel = DVec2::ZERO;
             let mut min_alt = f64::INFINITY;
+            let mut descending = false;
+            let mut ambient_temperature_k = AMBIENT_TEMP_K;
 
             for body in &self.bodies {
                 let alt = vessel.pos.distance(body.pos) - body.radius_m;
@@ -914,6 +916,12 @@ impl SimWorld {
                     if rho > max_rho {
                         max_rho = rho;
                         rel_vel = vessel.vel - body.vel;
+                        let surface_normal = (vessel.pos - body.pos).normalize_or_zero();
+                        descending = rel_vel.dot(surface_normal) < 0.0;
+                        let state = atmo.state_at(alt);
+                        if state.temperature_k > 0.0 {
+                            ambient_temperature_k = state.temperature_k;
+                        }
                     }
                 }
             }
@@ -927,6 +935,7 @@ impl SimWorld {
                     && min_alt <= 5_500.0
                     && speed <= 320.0
                     && max_rho > 0.01
+                    && descending
                 {
                     part.chute_deployed = true;
                     events.push(SimStepEvent::ChuteDeployed {
@@ -972,7 +981,7 @@ impl SimWorld {
                 })
                 .collect();
 
-            let base_flux = if max_rho > 0.0 && speed > 450.0 {
+            let base_flux = if descending && max_rho > 0.0 && speed > 450.0 {
                 REENTRY_HEAT_COEFF * max_rho.sqrt() * speed.powi(3)
             } else {
                 0.0
@@ -1013,11 +1022,11 @@ impl SimWorld {
 
                 let thermal_mass = (part.spec.dry_mass_kg * 28.0).max(1_200.0);
                 let q_cool = RADIATIVE_COOL_COEFF
-                    * (part.temperature_k.powi(4) - AMBIENT_TEMP_K.powi(4))
+                    * (part.temperature_k.powi(4) - ambient_temperature_k.powi(4))
                     * (size.x + size.y);
                 let net_q = q_in - q_cool;
                 part.temperature_k =
-                    (part.temperature_k + (net_q / thermal_mass) * dt).max(AMBIENT_TEMP_K);
+                    (part.temperature_k + (net_q / thermal_mass) * dt).max(ambient_temperature_k);
             }
 
             let was_crashed = vessel.crashed;
@@ -1811,6 +1820,67 @@ mod tests {
             v.parts.len() < 3,
             "expected lower engine part to break on impact"
         );
+    }
+
+    #[test]
+    fn heat_does_not_increase_without_atmospheric_density() {
+        let cat = default_part_catalog();
+        let mut bp = VesselBlueprint::new("VacuumProbe");
+        let pod = bp.add_root("command_pod", 0);
+        bp.attach_child(
+            pod,
+            "heat_shield",
+            AttachKind::StackBottom,
+            DVec2::new(0.0, -0.72),
+            0.0,
+            0,
+        );
+
+        let planet = CelestialBody::kepler_prime();
+        let mut vessel = Vessel::from_blueprint(1, &bp, &cat).expect("valid vacuum probe");
+        vessel.pos = DVec2::new(0.0, planet.radius_m + 500_000.0);
+        vessel.vel = DVec2::new(4_000.0, 0.0);
+
+        let init_ablator = vessel.total_ablator_kg();
+        let mut world = SimWorld::new();
+        world.bodies.push(planet);
+        world.vessels.push(vessel);
+        world.active_vessel_id = Some(1);
+
+        for _ in 0..240 {
+            world.step(1.0 / 120.0);
+        }
+
+        let vessel = world.active_vessel().expect("vacuum probe");
+        assert_eq!(vessel.total_ablator_kg(), init_ablator);
+        assert!(vessel.peak_temperature_k() <= AMBIENT_TEMP_K + 1.0);
+        assert!(vessel.peak_heat_flux() <= 1.0e-6);
+    }
+
+    #[test]
+    fn heat_does_not_increase_during_atmospheric_ascent() {
+        let cat = default_part_catalog();
+        let mut bp = VesselBlueprint::new("AscentProbe");
+        bp.add_root("probe_core", 0);
+
+        let planet = CelestialBody::kepler_prime();
+        let mut vessel = Vessel::from_blueprint(1, &bp, &cat).expect("valid ascent probe");
+        vessel.pos = DVec2::new(0.0, planet.radius_m + 50_000.0);
+        vessel.vel = DVec2::new(495.0, 700.0);
+        vessel.landed = false;
+
+        let mut world = SimWorld::new();
+        world.bodies.push(planet);
+        world.vessels.push(vessel);
+        world.active_vessel_id = Some(1);
+
+        for _ in 0..240 {
+            world.step(1.0 / 120.0);
+        }
+
+        let vessel = world.active_vessel().expect("ascent probe");
+        assert!(vessel.peak_heat_flux() <= 1.0e-6);
+        assert!(vessel.peak_temperature_k() <= AMBIENT_TEMP_K + 1.0);
     }
 
     #[test]

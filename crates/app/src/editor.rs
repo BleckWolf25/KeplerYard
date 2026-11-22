@@ -1,6 +1,6 @@
 //! @file editor.rs
 //!
-//! @version 2.1.0
+//! @version 2.1.1
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -308,7 +308,7 @@ impl Default for EditorState {
             palette_dirty: true,
             lists_dirty: true,
             crafts_drawer_open: false,
-            symmetry_2x: true,
+            symmetry_2x: false,
             snap_nodes: true,
             renaming_craft: false,
             drag: DragPhase::Idle,
