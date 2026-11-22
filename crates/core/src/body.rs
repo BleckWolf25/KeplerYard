@@ -1,6 +1,6 @@
 //! @file body.rs
 //!
-//! @version 1.4.0
+//! @version 1.5.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -43,6 +43,21 @@ pub const DRY_AIR_HEAT_CAPACITY_RATIO: f64 = 1.4;
 
 /// Sea-level reference temperature for the first atmospheric-state approximation (K).
 pub const SEA_LEVEL_STANDARD_TEMP_K: f64 = 288.15;
+
+/// Mean Earth radius (m).
+pub const EARTH_RADIUS_M: f64 = 6_371_000.0;
+
+/// Standard Earth surface gravitational acceleration (m/s^2).
+pub const EARTH_SURFACE_G: f64 = 9.80665;
+
+/// Mean Earth-Moon distance (m).
+pub const EARTH_MOON_DISTANCE_M: f64 = 384_400_000.0;
+
+/// Mean Moon radius (m).
+pub const EARTH_MOON_RADIUS_M: f64 = 1_737_400.0;
+
+/// Standard Moon surface gravitational acceleration (m/s^2).
+pub const EARTH_MOON_SURFACE_G: f64 = 1.62;
 
 // ---------- TYPES
 
@@ -192,6 +207,25 @@ impl CelestialBody {
         }
     }
 
+    /// Constructs Earth using mean radius and standard surface gravitational acceleration.
+    #[must_use]
+    pub fn earth() -> Self {
+        let mu = EARTH_SURFACE_G * EARTH_RADIUS_M * EARTH_RADIUS_M;
+        Self {
+            id: 0,
+            name: String::from("Earth"),
+            mass_kg: mu / GRAV_CONSTANT,
+            radius_m: EARTH_RADIUS_M,
+            pos: DVec2::ZERO,
+            vel: DVec2::ZERO,
+            atmosphere: Some(AtmosphereParams {
+                sea_level_density_kg_m3: 1.225,
+                scale_height_m: 8_500.0,
+                max_altitude_m: 100_000.0,
+            }),
+        }
+    }
+
     /// Constructs the Moon in a circular prograde orbit around `planet`.
     #[must_use]
     pub fn moon(planet: &Self) -> Self {
@@ -212,6 +246,26 @@ impl CelestialBody {
         }
     }
 
+    /// Constructs the Moon in a circular prograde orbit around Earth.
+    #[must_use]
+    pub fn earth_moon(earth: &Self) -> Self {
+        let mu_moon = EARTH_MOON_SURFACE_G * EARTH_MOON_RADIUS_M * EARTH_MOON_RADIUS_M;
+        let v_orb = (earth.mu() / EARTH_MOON_DISTANCE_M).sqrt();
+        let init_angle = 105.0_f64.to_radians();
+        let pos_rel = DVec2::new(init_angle.cos(), init_angle.sin()) * EARTH_MOON_DISTANCE_M;
+        let vel_rel = DVec2::new(-init_angle.sin(), init_angle.cos()) * v_orb;
+
+        Self {
+            id: 1,
+            name: String::from("Moon"),
+            mass_kg: mu_moon / GRAV_CONSTANT,
+            radius_m: EARTH_MOON_RADIUS_M,
+            pos: earth.pos + pos_rel,
+            vel: earth.vel + vel_rel,
+            atmosphere: None,
+        }
+    }
+
     /// Constructs the Kepler Prime + Moon two-body pair in a zero-drift barycentric frame.
     #[must_use]
     pub fn kepler_moon_system() -> [Self; 2] {
@@ -222,6 +276,18 @@ impl CelestialBody {
         planet.vel -= bary_vel;
         moon.vel -= bary_vel;
         [planet, moon]
+    }
+
+    /// Constructs the real Earth-Moon pair in a zero-drift barycentric frame.
+    #[must_use]
+    pub fn earth_moon_system() -> [Self; 2] {
+        let mut earth = Self::earth();
+        let mut moon = Self::earth_moon(&earth);
+        let total_mass = (earth.mass_kg + moon.mass_kg).max(1.0);
+        let bary_vel = moon.vel * (moon.mass_kg / total_mass);
+        earth.vel -= bary_vel;
+        moon.vel -= bary_vel;
+        [earth, moon]
     }
 }
 
@@ -235,6 +301,30 @@ impl CelestialCatalog {
         let bary_vel = moon.vel * (moon.mass_kg / total_mass);
 
         let specs = [&planet, &moon]
+            .iter()
+            .map(|body| CelestialBodySpec {
+                id: body.id,
+                name: body.name.clone(),
+                mass_kg: body.mass_kg,
+                radius_m: body.radius_m,
+                pos: body.pos,
+                vel: body.vel - bary_vel,
+                atmosphere: body.atmosphere,
+            })
+            .collect();
+
+        Self { bodies: specs }
+    }
+
+    /// Builds the real Earth-Moon development system as catalog specifications.
+    #[must_use]
+    pub fn earth_moon() -> Self {
+        let earth = CelestialBody::earth();
+        let moon = CelestialBody::earth_moon(&earth);
+        let total_mass = (earth.mass_kg + moon.mass_kg).max(1.0);
+        let bary_vel = moon.vel * (moon.mass_kg / total_mass);
+
+        let specs = [&earth, &moon]
             .iter()
             .map(|body| CelestialBodySpec {
                 id: body.id,
@@ -495,5 +585,44 @@ mod tests {
         assert!((state.temperature_k - 288.15).abs() < 1.0e-12);
         assert!((state.pressure_pa - 101_325.0).abs() < 500.0);
         assert!((state.speed_of_sound_m_s - 340.294).abs() < 0.1);
+    }
+
+    #[test]
+    fn real_earth_moon_system_uses_mean_reference_values() {
+        let earth = CelestialBody::earth();
+        let moon = CelestialBody::earth_moon(&earth);
+        assert_eq!(earth.name, "Earth");
+        assert_eq!(moon.name, "Moon");
+        assert!((earth.radius_m - 6_371_000.0).abs() < 1.0e-6);
+        assert!((moon.radius_m - 1_737_400.0).abs() < 1.0e-6);
+        assert!((moon.pos.distance(earth.pos) - EARTH_MOON_DISTANCE_M).abs() < 1.0e-6);
+
+        let [earth, moon] = CelestialBody::earth_moon_system();
+        let momentum = earth.vel * earth.mass_kg + moon.vel * moon.mass_kg;
+        let momentum_scale = earth.vel.length() * earth.mass_kg + moon.vel.length() * moon.mass_kg;
+        assert!(
+            momentum.length() / momentum_scale.max(1.0) < 1.0e-12,
+            "Earth-Moon momentum residual: {:.6e}",
+            momentum.length() / momentum_scale.max(1.0)
+        );
+    }
+
+    #[test]
+    fn earth_moon_catalog_builds_named_barycentric_system() {
+        let bodies = CelestialCatalog::earth_moon().build_system();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0].name, "Earth");
+        assert_eq!(bodies[1].name, "Moon");
+        let momentum = bodies
+            .iter()
+            .fold(DVec2::ZERO, |total, body| total + body.vel * body.mass_kg);
+        let momentum_scale = bodies
+            .iter()
+            .fold(0.0, |total, body| total + body.vel.length() * body.mass_kg);
+        assert!(
+            momentum.length() / momentum_scale.max(1.0) < 1.0e-12,
+            "catalog momentum residual: {:.6e}",
+            momentum.length() / momentum_scale.max(1.0)
+        );
     }
 }

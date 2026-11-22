@@ -1,6 +1,6 @@
 //! @file sim.rs
 //!
-//! @version 1.3.0
+//! @version 1.4.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -212,6 +212,31 @@ impl SimWorld {
         vessel.place_on_north_pole_with_vel(planet.pos, planet.vel, planet.radius_m);
         let active_id = vessel.id;
         world.bodies.push(planet);
+        world.bodies.push(moon);
+        world.vessels.push(vessel);
+        world.active_vessel_id = Some(active_id);
+        Ok(world)
+    }
+
+    /// Creates the Earth-Moon system with the vessel placed upright on Earth's north pole.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError`] if the blueprint cannot be assembled into a valid vessel.
+    pub fn with_earth_moon_vessel(
+        bp: &VesselBlueprint,
+        catalog: &crate::parts::PartCatalog,
+    ) -> Result<Self, SimError> {
+        let mut world = Self::new();
+        let catalog_bodies = CelestialCatalog::earth_moon().build_system();
+        let [earth, moon]: [CelestialBody; 2] = catalog_bodies
+            .try_into()
+            .map_err(|_| SimError::EmptyBlueprint)?;
+        let mut vessel = Vessel::from_blueprint(world.next_vessel_id, bp, catalog)?;
+        world.next_vessel_id += 1;
+        vessel.place_on_north_pole_with_vel(earth.pos, earth.vel, earth.radius_m);
+        let active_id = vessel.id;
+        world.bodies.push(earth);
         world.bodies.push(moon);
         world.vessels.push(vessel);
         world.active_vessel_id = Some(active_id);
@@ -1261,6 +1286,20 @@ mod tests {
     use crate::math::{G0, SplitMix64};
     use crate::parts::{AttachKind, default_part_catalog, starter_two_stage_blueprint};
 
+    fn propagate_circular_orbit(mu: f64, radius_m: f64, dt_s: f64, steps: usize) -> DVec2 {
+        let mut pos = DVec2::new(radius_m, 0.0);
+        let mut vel = DVec2::new(0.0, (mu / radius_m).sqrt());
+        for _ in 0..steps {
+            let r_sq = pos.length_squared().max(1.0);
+            let acceleration = pos * (-mu / (r_sq * r_sq.sqrt()));
+            pos += vel * dt_s + acceleration * (0.5 * dt_s * dt_s);
+            let next_r_sq = pos.length_squared().max(1.0);
+            let next_acceleration = pos * (-mu / (next_r_sq * next_r_sq.sqrt()));
+            vel += (acceleration + next_acceleration) * (0.5 * dt_s);
+        }
+        pos
+    }
+
     #[test]
     fn golden_elliptical_orbit_conserves_energy_and_angular_momentum() {
         let planet = CelestialBody::kepler_prime();
@@ -1754,6 +1793,33 @@ mod tests {
         assert!(
             v.parts.len() < 3,
             "expected lower engine part to break on impact"
+        );
+    }
+
+    #[test]
+    fn fixed_120_hz_substep_matches_finer_reference_circular_orbit() {
+        let earth = CelestialBody::earth();
+        let radius_m = earth.radius_m + 300_000.0;
+        let mu = earth.mu();
+        let period_s = TAU_F64 * (radius_m.powi(3) / mu).sqrt();
+
+        let steps_120 = ((period_s / FIXED_SUBSTEP_DT).round()) as usize;
+        let steps_240 = ((period_s / (0.5 * FIXED_SUBSTEP_DT)).round()) as usize;
+        let at_120 = propagate_circular_orbit(mu, radius_m, FIXED_SUBSTEP_DT, steps_120);
+        let at_240 = propagate_circular_orbit(mu, radius_m, 0.5 * FIXED_SUBSTEP_DT, steps_240);
+        let reference_error_m = at_240.distance(DVec2::new(radius_m, 0.0));
+        let coarse_error_m = at_120.distance(DVec2::new(radius_m, 0.0));
+        assert!(
+            reference_error_m < 100.0,
+            "reference error {reference_error_m:.3} m"
+        );
+        assert!(
+            coarse_error_m < 1_000.0,
+            "120 Hz error {coarse_error_m:.3} m"
+        );
+        assert!(
+            (coarse_error_m - reference_error_m).abs() < 1.0,
+            "120 Hz={coarse_error_m:.3} m, 240 Hz={reference_error_m:.3} m"
         );
     }
 }
