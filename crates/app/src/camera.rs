@@ -1,6 +1,6 @@
 //! @file camera.rs
 //!
-//! @version 1.2.0
+//! @version 1.2.1
 //! @author `BleckWolf25`
 //! @license MIT
 //!
@@ -46,6 +46,7 @@ pub struct CameraZoomState {
 
 #[derive(SystemParam)]
 struct CameraInput<'w, 's> {
+    windows: Query<'w, 's, &'static Window>,
     mode: Res<'w, State<GameMode>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
@@ -90,7 +91,29 @@ fn on_enter_flight(mut zoom: ResMut<'_, CameraZoomState>, mut focus: ResMut<'_, 
     focus.target = CameraFocusTarget::ActiveVessel;
 }
 
-fn is_pointer_over_interactive_ui(
+fn read_scroll_delta(input: &mut CameraInput<'_, '_>, over_ui: bool) -> (f32, bool) {
+    let mut scroll_delta = 0.0_f32;
+    let mut wheel_used = false;
+    for ev in input.wheel.read() {
+        if !over_ui {
+            let normalized = match ev.unit {
+                MouseScrollUnit::Line => ev.y,
+                MouseScrollUnit::Pixel => ev.y / 28.0,
+            };
+            scroll_delta += normalized;
+            wheel_used = true;
+        }
+    }
+    if input.keys.pressed(KeyCode::Equal) || input.keys.pressed(KeyCode::NumpadAdd) {
+        scroll_delta += 0.35;
+    }
+    if input.keys.pressed(KeyCode::Minus) || input.keys.pressed(KeyCode::NumpadSubtract) {
+        scroll_delta -= 0.35;
+    }
+    (scroll_delta.clamp(-2.5, 2.5), wheel_used)
+}
+
+pub fn is_pointer_over_interactive_ui(
     hover_map: &HoverMap,
     ui_nodes: &Query<'_, '_, Option<&Pickable>, With<Node>>,
 ) -> bool {
@@ -108,27 +131,12 @@ fn update_camera_zoom_and_pan(
     mut zoom: ResMut<'_, CameraZoomState>,
     mut focus: ResMut<'_, CameraFocusState>,
     mut cam_q: Query<'_, '_, (&mut Transform, &mut Projection), With<MainCamera>>,
+    mut left_pan_armed: Local<'_, bool>,
 ) {
     let over_ui = is_pointer_over_interactive_ui(&input.hover_map, &input.ui_nodes);
 
-    let mut scroll_delta = 0.0_f32;
-    for ev in input.wheel.read() {
-        if !over_ui {
-            let normalized = match ev.unit {
-                MouseScrollUnit::Line => ev.y,
-                MouseScrollUnit::Pixel => ev.y / 28.0,
-            };
-            scroll_delta += normalized;
-        }
-    }
-    if input.keys.pressed(KeyCode::Equal) || input.keys.pressed(KeyCode::NumpadAdd) {
-        scroll_delta += 0.35;
-    }
-    if input.keys.pressed(KeyCode::Minus) || input.keys.pressed(KeyCode::NumpadSubtract) {
-        scroll_delta -= 0.35;
-    }
-
-    scroll_delta = scroll_delta.clamp(-2.5, 2.5);
+    let (scroll_delta, wheel_used) = read_scroll_delta(&mut input, over_ui);
+    let old_scale = zoom.log_scale.exp();
     if scroll_delta.abs() > 1.0e-4 {
         zoom.log_scale -= scroll_delta * 0.14;
     }
@@ -141,12 +149,43 @@ fn update_camera_zoom_and_pan(
 
     let ortho_scale = zoom.log_scale.exp();
 
+    // Zoom toward the mouse cursor: keep the world point under the pointer fixed on screen.
+    if wheel_used
+        && !over_ui
+        && let Ok(window) = input.windows.single()
+        && let Some(cursor) = window.cursor_position()
+    {
+        let offset_px = Vec2::new(
+            cursor.x - window.width() * 0.5,
+            window.height() * 0.5 - cursor.y,
+        );
+        let shift = offset_px * (old_scale - ortho_scale);
+        match input.mode.get() {
+            GameMode::Editor => {
+                zoom.editor_pan += shift;
+                zoom.editor_pan = zoom.editor_pan.clamp(Vec2::splat(-60.0), Vec2::splat(60.0));
+            }
+            GameMode::Flight => {
+                zoom.flight_pan_m.x += f64::from(shift.x);
+                zoom.flight_pan_m.y += f64::from(shift.y);
+            }
+        }
+    }
+
+    // Right/middle drag pans everywhere; in flight the left button also drags the view
+    // (the editor reserves left-drag for parts and uses its own empty-space panning).
+    if input.mouse_buttons.just_pressed(MouseButton::Left) {
+        *left_pan_armed = !over_ui;
+    }
+    let flight_left_pan = matches!(input.mode.get(), GameMode::Flight)
+        && *left_pan_armed
+        && input.mouse_buttons.pressed(MouseButton::Left);
+    let right_or_middle = !over_ui
+        && (input.mouse_buttons.pressed(MouseButton::Right)
+            || input.mouse_buttons.pressed(MouseButton::Middle));
     let mut drag = Vec2::ZERO;
     for ev in input.motion.read() {
-        if !over_ui
-            && (input.mouse_buttons.pressed(MouseButton::Right)
-                || input.mouse_buttons.pressed(MouseButton::Middle))
-        {
+        if right_or_middle || flight_left_pan {
             drag += ev.delta;
         }
     }

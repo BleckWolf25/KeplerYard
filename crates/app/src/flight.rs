@@ -1,6 +1,6 @@
 //! @file flight.rs
 //!
-//! @version 1.3.0
+//! @version 1.3.1
 //! @author `BleckWolf25`
 //! @license MIT
 //!
@@ -72,6 +72,8 @@ pub struct FlightSimState {
     pub max_speed_m_s: f64,
     pub max_temp_k: f64,
     pub staging_count: u32,
+    pub stage_requested: bool,
+    pub throttle_override: Option<f64>,
     pred_tick: u32,
 }
 
@@ -299,9 +301,9 @@ fn enter_flight(
     }
     spawn_flight_hud_ui(&mut commands);
 
-    let pred = world.active_vessel_id.map_or_default(|id| {
-        world.predict_trajectory_with_plan(id, PredictionOptions::default(), None)
-    });
+    let pred = world
+        .active_vessel_id
+        .map_or_default(|id| world.predict_trajectory_with_plan(id, PredictionOptions::default(), None));
 
     commands.insert_resource(FlightSimState {
         world,
@@ -322,6 +324,8 @@ fn enter_flight(
         max_speed_m_s: 0.0,
         max_temp_k: 293.15,
         staging_count: 0,
+        stage_requested: false,
+        throttle_override: None,
         pred_tick: 0,
     });
 }
@@ -585,6 +589,9 @@ fn step_flight_controls_and_physics(
 
     let dt_real = f64::from(time.delta_secs()).min(0.05);
 
+    if let Some(t) = flight.throttle_override.take() {
+        flight.throttle = t;
+    }
     if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ArrowUp) {
         flight.throttle = (flight.throttle + 0.65 * dt_real).min(1.0);
     }
@@ -750,7 +757,9 @@ fn step_flight_controls_and_physics(
         rcs_trans.x += 1.0;
     }
 
-    if keys.just_pressed(KeyCode::Space)
+    let stage_clicked = flight.stage_requested;
+    flight.stage_requested = false;
+    if (keys.just_pressed(KeyCode::Space) || stage_clicked)
         && let Some(outcome) = flight.world.trigger_active_stage()
     {
         flight.staging_count += 1;
@@ -885,11 +894,14 @@ fn step_flight_controls_and_physics(
     if flight.pred_tick >= PREDICTION_REFRESH_FRAMES || flight.maneuver.enabled {
         flight.pred_tick = 0;
         let plan_opt = flight.maneuver.enabled.then_some(flight.maneuver);
-        flight.last_prediction = flight.world.active_vessel_id.map_or_default(|id| {
-            flight
-                .world
-                .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
-        });
+        flight.last_prediction = flight
+            .world
+            .active_vessel_id
+            .map_or_default(|id| {
+                flight
+                    .world
+                    .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
+            });
     }
 }
 
@@ -1259,6 +1271,7 @@ impl Plugin for FlightPlugin {
                     step_flight_controls_and_physics,
                     sync_or_rebuild_vessel_visuals,
                     sync_flight_visuals_and_hud,
+                    crate::flight_hud::sync_throttle_slider,
                     update_environment_and_particles,
                 )
                     .chain()
