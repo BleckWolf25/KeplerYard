@@ -1,6 +1,6 @@
 //! @file body.rs
 //!
-//! @version 1.3.0
+//! @version 1.4.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -35,6 +35,15 @@ pub const MOON_RADIUS_M: f64 = 120_000.0;
 /// Surface gravitational acceleration of the Moon (m / s^2).
 pub const MOON_SURFACE_G: f64 = 1.63;
 
+/// Standard dry-air specific gas constant (J / kg / K).
+pub const DRY_AIR_GAS_CONSTANT_J_KGK: f64 = 287.05287;
+
+/// Standard dry-air heat-capacity ratio.
+pub const DRY_AIR_HEAT_CAPACITY_RATIO: f64 = 1.4;
+
+/// Sea-level reference temperature for the first atmospheric-state approximation (K).
+pub const SEA_LEVEL_STANDARD_TEMP_K: f64 = 288.15;
+
 // ---------- TYPES
 
 /// Exponential atmosphere density profile (`rho = sea_level_density * exp(-altitude / scale_height)`).
@@ -43,6 +52,15 @@ pub struct AtmosphereParams {
     pub sea_level_density_kg_m3: f64,
     pub scale_height_m: f64,
     pub max_altitude_m: f64,
+}
+
+/// Thermodynamic state derived from an exponential density profile.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtmosphericState {
+    pub density_kg_m3: f64,
+    pub pressure_pa: f64,
+    pub temperature_k: f64,
+    pub speed_of_sound_m_s: f64,
 }
 
 /// A massive celestial body participating in full N-body gravitation.
@@ -114,6 +132,27 @@ impl AtmosphereParams {
         }
         let h = altitude_m.max(0.0);
         self.sea_level_density_kg_m3 * (-h / self.scale_height_m).exp()
+    }
+
+    /// Returns density, pressure, temperature, and speed of sound at altitude.
+    #[must_use]
+    pub fn state_at(&self, altitude_m: f64) -> AtmosphericState {
+        let density_kg_m3 = self.density_at(altitude_m);
+        let temperature_k = if altitude_m <= self.max_altitude_m {
+            SEA_LEVEL_STANDARD_TEMP_K
+        } else {
+            0.0
+        };
+        let pressure_pa = density_kg_m3 * DRY_AIR_GAS_CONSTANT_J_KGK * temperature_k;
+        let speed_of_sound_m_s =
+            (DRY_AIR_HEAT_CAPACITY_RATIO * DRY_AIR_GAS_CONSTANT_J_KGK * temperature_k).sqrt();
+
+        AtmosphericState {
+            density_kg_m3,
+            pressure_pa,
+            temperature_k,
+            speed_of_sound_m_s,
+        }
     }
 }
 
@@ -422,5 +461,39 @@ mod tests {
             momentum + body.vel * body.mass_kg
         });
         assert!(p_tot.length() < 1.0e-6);
+    }
+
+    #[test]
+    fn escape_speed_matches_analytical_value() {
+        let planet = CelestialBody::kepler_prime();
+        let radius_m = planet.radius_m + 100_000.0;
+        let escape_m_s = (2.0 * planet.mu() / radius_m).sqrt();
+        let circular_m_s = (planet.mu() / radius_m).sqrt();
+        assert!((escape_m_s / circular_m_s - 2.0_f64.sqrt()).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn circular_period_matches_kepler_third_law() {
+        let planet = CelestialBody::kepler_prime();
+        let radius_m = planet.radius_m + 100_000.0;
+        let period_s = TAU_F64 * (radius_m.powi(3) / planet.mu()).sqrt();
+        let altitude = DVec2::new(radius_m, 0.0);
+        let speed = DVec2::new(0.0, (planet.mu() / radius_m).sqrt());
+        let elements = dominant_body_elements(&[planet], altitude, speed).expect("orbit elements");
+        let predicted = elements.period_s.expect("bound orbit period");
+        assert!((predicted - period_s).abs() / period_s < 1.0e-12);
+    }
+
+    #[test]
+    fn atmosphere_state_matches_sea_level_ideal_gas_reference() {
+        let atmosphere = AtmosphereParams {
+            sea_level_density_kg_m3: 1.225,
+            scale_height_m: 5_600.0,
+            max_altitude_m: 70_000.0,
+        };
+        let state = atmosphere.state_at(0.0);
+        assert!((state.temperature_k - 288.15).abs() < 1.0e-12);
+        assert!((state.pressure_pa - 101_325.0).abs() < 500.0);
+        assert!((state.speed_of_sound_m_s - 340.294).abs() < 0.1);
     }
 }

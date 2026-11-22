@@ -1,6 +1,6 @@
 //! @file lib.rs
 //!
-//! @version 1.3.0
+//! @version 1.4.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -26,9 +26,11 @@ pub mod vessel;
 
 // ---------- EXPORTS
 pub use body::{
-    AtmosphereParams, CelestialBody, CelestialBodySpec, CelestialCatalog, KEPLER_PRIME_RADIUS_M,
+    AtmosphereParams, AtmosphericState, CelestialBody, CelestialBodySpec, CelestialCatalog,
+    DRY_AIR_GAS_CONSTANT_J_KGK, DRY_AIR_HEAT_CAPACITY_RATIO, KEPLER_PRIME_RADIUS_M,
     KEPLER_PRIME_SURFACE_G, MOON_ORBIT_RADIUS_M, MOON_RADIUS_M, MOON_SURFACE_G, OrbitElements,
-    TransferPlanEstimate, compute_hohmann_transfer, dominant_body_elements,
+    SEA_LEVEL_STANDARD_TEMP_K, TransferPlanEstimate, compute_hohmann_transfer,
+    dominant_body_elements,
 };
 pub use math::{DVec2, G0, GRAV_CONSTANT, SplitMix64, normalize_angle, rotate_vec2};
 pub use parts::{
