@@ -1,7 +1,7 @@
 //! @file parts.rs
 //!
-//! @version 1.3.0
-//! @author `BleckWolf25`
+//! @version 1.3.1
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Categorized rocket part specifications, SRB Booster shape, mirroring, and `CoP` analysis
@@ -13,7 +13,9 @@
 //! of Pressure, and pre-flight engineering validation checks.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -1060,7 +1062,7 @@ pub fn starter_two_stage_blueprint(catalog: &PartCatalog) -> VesselBlueprint {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn lunar_capable_blueprint(catalog: &PartCatalog) -> VesselBlueprint {
-    let mut bp = VesselBlueprint::new("Selene Explorer III");
+    let mut bp = VesselBlueprint::new("Moon Explorer III");
     let pod_id = bp.add_root("command_pod", 3);
 
     let size_of = |id: &str, fallback: DVec2| -> DVec2 {

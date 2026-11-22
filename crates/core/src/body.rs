@@ -1,18 +1,20 @@
 //! @file body.rs
 //!
-//! @version 1.2.0
-//! @author `BleckWolf25`
+//! @version 1.3.0
+//! @author BleckWolf25
 //! @license MIT
 //!
-//! @summary Celestial body models, Moon Selene, atmospheres, orbital elements, and Hohmann transfer planning
+//! @summary Data-driven celestial bodies, Moon models, atmospheres, orbital elements, and Hohmann planning
 //!
 //! @description
-//! Defines massive gravitating bodies (`Kepler Prime` and moon `Selene`) with surface radii,
+//! Defines massive gravitating bodies (`Kepler Prime` and the Moon) with surface radii,
 //! zero-drift barycentric system setup, exponential atmosphere profiles, Sphere of Influence radius
 //! calculations, two-body osculating orbital elements, and analytical Hohmann transfer planners.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 // ---------- IMPORTS
 use crate::math::{DVec2, GRAV_CONSTANT, TAU_F64, normalize_angle};
 use core::f64::consts::PI;
@@ -24,14 +26,14 @@ pub const KEPLER_PRIME_RADIUS_M: f64 = 600_000.0;
 /// Surface gravitational acceleration of Kepler Prime (m / s^2).
 pub const KEPLER_PRIME_SURFACE_G: f64 = 9.81;
 
-/// Orbital radius of moon Selene around Kepler Prime (3,600 km).
-pub const SELENE_ORBIT_RADIUS_M: f64 = 3_600_000.0;
+/// Orbital radius of the Moon around Kepler Prime (3,600 km).
+pub const MOON_ORBIT_RADIUS_M: f64 = 3_600_000.0;
 
-/// Radius of moon Selene in meters (120 km).
-pub const SELENE_RADIUS_M: f64 = 120_000.0;
+/// Radius of the Moon in meters (120 km).
+pub const MOON_RADIUS_M: f64 = 120_000.0;
 
-/// Surface gravitational acceleration of moon Selene (m / s^2).
-pub const SELENE_SURFACE_G: f64 = 1.63;
+/// Surface gravitational acceleration of the Moon (m / s^2).
+pub const MOON_SURFACE_G: f64 = 1.63;
 
 // ---------- TYPES
 
@@ -53,6 +55,24 @@ pub struct CelestialBody {
     pub pos: DVec2,
     pub vel: DVec2,
     pub atmosphere: Option<AtmosphereParams>,
+}
+
+/// Data describing an initial celestial body before barycentric-frame adjustment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CelestialBodySpec {
+    pub id: u32,
+    pub name: String,
+    pub mass_kg: f64,
+    pub radius_m: f64,
+    pub pos: DVec2,
+    pub vel: DVec2,
+    pub atmosphere: Option<AtmosphereParams>,
+}
+
+/// Immutable catalog of celestial-system initialization specifications.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CelestialCatalog {
+    pub bodies: Vec<CelestialBodySpec>,
 }
 
 /// Osculating two-body Keplerian orbital summary relative to a dominant body.
@@ -133,36 +153,79 @@ impl CelestialBody {
         }
     }
 
-    /// Constructs the second celestial body "Selene" in circular prograde orbit around `planet`.
+    /// Constructs the Moon in a circular prograde orbit around `planet`.
     #[must_use]
-    pub fn selene(planet: &Self) -> Self {
-        let mu_selene = SELENE_SURFACE_G * SELENE_RADIUS_M * SELENE_RADIUS_M;
-        let v_orb = (planet.mu() / SELENE_ORBIT_RADIUS_M).sqrt();
+    pub fn moon(planet: &Self) -> Self {
+        let mu_moon = MOON_SURFACE_G * MOON_RADIUS_M * MOON_RADIUS_M;
+        let v_orb = (planet.mu() / MOON_ORBIT_RADIUS_M).sqrt();
         let init_angle = 105.0_f64.to_radians();
-        let pos_rel = DVec2::new(init_angle.cos(), init_angle.sin()) * SELENE_ORBIT_RADIUS_M;
+        let pos_rel = DVec2::new(init_angle.cos(), init_angle.sin()) * MOON_ORBIT_RADIUS_M;
         let vel_rel = DVec2::new(-init_angle.sin(), init_angle.cos()) * v_orb;
 
         Self {
             id: 1,
-            name: String::from("Selene"),
-            mass_kg: mu_selene / GRAV_CONSTANT,
-            radius_m: SELENE_RADIUS_M,
+            name: String::from("Moon"),
+            mass_kg: mu_moon / GRAV_CONSTANT,
+            radius_m: MOON_RADIUS_M,
             pos: planet.pos + pos_rel,
             vel: planet.vel + vel_rel,
             atmosphere: None,
         }
     }
 
-    /// Constructs the Kepler Prime + Selene two-body pair in a zero-drift barycentric frame.
+    /// Constructs the Kepler Prime + Moon two-body pair in a zero-drift barycentric frame.
     #[must_use]
-    pub fn kepler_selene_system() -> [Self; 2] {
+    pub fn kepler_moon_system() -> [Self; 2] {
         let mut planet = Self::kepler_prime();
-        let mut moon = Self::selene(&planet);
+        let mut moon = Self::moon(&planet);
         let total_mass = (planet.mass_kg + moon.mass_kg).max(1.0);
         let bary_vel = moon.vel * (moon.mass_kg / total_mass);
         planet.vel -= bary_vel;
         moon.vel -= bary_vel;
         [planet, moon]
+    }
+}
+
+impl CelestialCatalog {
+    /// Builds the Kepler Prime development system with the Moon in a circular prograde orbit.
+    #[must_use]
+    pub fn kepler_moon() -> Self {
+        let planet = CelestialBody::kepler_prime();
+        let moon = CelestialBody::moon(&planet);
+        let total_mass = (planet.mass_kg + moon.mass_kg).max(1.0);
+        let bary_vel = moon.vel * (moon.mass_kg / total_mass);
+
+        let specs = [&planet, &moon]
+            .iter()
+            .map(|body| CelestialBodySpec {
+                id: body.id,
+                name: body.name.clone(),
+                mass_kg: body.mass_kg,
+                radius_m: body.radius_m,
+                pos: body.pos,
+                vel: body.vel - bary_vel,
+                atmosphere: body.atmosphere,
+            })
+            .collect();
+
+        Self { bodies: specs }
+    }
+
+    /// Constructs runtime bodies from catalog specifications without mutating the catalog.
+    #[must_use]
+    pub fn build_system(&self) -> Vec<CelestialBody> {
+        self.bodies
+            .iter()
+            .map(|spec| CelestialBody {
+                id: spec.id,
+                name: spec.name.clone(),
+                mass_kg: spec.mass_kg,
+                radius_m: spec.radius_m,
+                pos: spec.pos,
+                vel: spec.vel,
+                atmosphere: spec.atmosphere,
+            })
+            .collect()
     }
 }
 
@@ -327,9 +390,9 @@ mod tests {
     }
 
     #[test]
-    fn selene_hohmann_transfer_estimates_match_orbital_mechanics() {
+    fn moon_hohmann_transfer_estimates_match_orbital_mechanics() {
         let planet = CelestialBody::kepler_prime();
-        let moon = CelestialBody::selene(&planet);
+        let moon = CelestialBody::moon(&planet);
         let r1 = planet.radius_m + 100_000.0;
         let v1 = (planet.mu() / r1).sqrt();
         let plan =
@@ -342,8 +405,22 @@ mod tests {
 
     #[test]
     fn barycentric_system_has_zero_net_momentum() {
-        let [planet, moon] = CelestialBody::kepler_selene_system();
+        let [planet, moon] = CelestialBody::kepler_moon_system();
         let p_tot = planet.vel * planet.mass_kg + moon.vel * moon.mass_kg;
+        assert!(p_tot.length() < 1.0e-6);
+    }
+
+    #[test]
+    fn catalog_build_matches_named_moon_system() {
+        let catalog = CelestialCatalog::kepler_moon();
+        let bodies = catalog.build_system();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0].name, "Kepler Prime");
+        assert_eq!(bodies[1].name, "Moon");
+
+        let p_tot = bodies.iter().fold(DVec2::ZERO, |momentum, body| {
+            momentum + body.vel * body.mass_kg
+        });
         assert!(p_tot.length() < 1.0e-6);
     }
 }

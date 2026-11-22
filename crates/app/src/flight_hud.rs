@@ -1,7 +1,7 @@
-//! @file `flight_hud.rs`
+//! @file flight_hud.rs
 //!
-//! @version 1.1.1
-//! @author `BleckWolf25`
+//! @version 1.2.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Flight HUD, 2D Navball attitude ring, SAS mode selector, map badges, and pause/recover UI
@@ -12,7 +12,9 @@
 //! Escape pause, revert-to-launch, revert-to-VAB, and vessel recovery summary modal.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -81,7 +83,7 @@ pub enum FlightUiAction {
     ToggleSas,
     SetSasMode(SasMode),
     ToggleRcs,
-    PlanSelene,
+    PlanMoon,
     ClearManeuver,
     CycleVessel,
     CycleFocus,
@@ -270,8 +272,8 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     spawn_hud_btn(
                         bar,
                         "Plan TLI [M]",
-                        "Plan a Hohmann transfer burn to Selene",
-                        FlightUiAction::PlanSelene,
+                        "Plan a Hohmann transfer burn to the Moon",
+                        FlightUiAction::PlanMoon,
                         None,
                         None,
                         None,
@@ -685,7 +687,7 @@ pub fn apply_flight_ui_action(
                 String::from("RCS thrusters OFF.")
             };
         }
-        FlightUiAction::PlanSelene => {
+        FlightUiAction::PlanMoon => {
             if let Some(v) = flight.world.active_vessel()
                 && let Some(est) = compute_hohmann_transfer(&flight.world.bodies, v.pos, v.vel, 1)
             {
@@ -695,7 +697,7 @@ pub fn apply_flight_ui_action(
                     prograde_dv_m_s: est.dv1_m_s,
                     radial_dv_m_s: 0.0,
                 };
-                flight.status_banner = String::from("Planned Hohmann TLI maneuver to Selene.");
+                flight.status_banner = String::from("Planned Hohmann TLI maneuver to the Moon.");
             }
         }
         FlightUiAction::ClearManeuver => {
@@ -969,7 +971,7 @@ fn update_floating_map_badges(
     if let Some(moon) = flight.world.bodies.get(1) {
         entries.push((
             moon.pos,
-            String::from("Selene"),
+            String::from("Moon"),
             Color::srgb(0.95, 0.88, 0.42),
         ));
     }
@@ -1002,7 +1004,7 @@ fn update_floating_map_badges(
             ),
             ApsisKind::Impact => (String::from("IMPACT"), Color::srgb(1.0, 0.34, 0.28)),
             ApsisKind::MoonEncounter => (
-                format!("Selene Enc ({:.0} km)", m.altitude_m / 1000.0),
+                format!("Moon Encounter ({:.0} km)", m.altitude_m / 1000.0),
                 Color::srgb(1.0, 0.86, 0.24),
             ),
             ApsisKind::ClosestApproach => (
@@ -1143,7 +1145,7 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
             format!(
                 "TLI NODE: T-{:.0}s | Burn ~{:.1}s\n\
                  Pro: {:+.1} m/s  Rad: {:+.1} m/s  (Cap ~{:.0})\n\
-                 Planned Selene Miss/Peri: {}",
+                 Planned Moon Miss/Peri: {}",
                 flight.maneuver.lead_time_s,
                 burn_s,
                 flight.maneuver.prograde_dv_m_s,
@@ -1153,7 +1155,7 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
             )
         }
         (Some(est), false) => format!(
-            "Selene Window: in {:.0}s | Est TLI dV {:.0} m/s",
+            "Moon Window: in {:.0}s | Est TLI dV {:.0} m/s",
             est.lead_time_until_window_s, est.dv1_m_s
         ),
         (None, _) => String::new(),

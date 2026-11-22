@@ -1,7 +1,7 @@
 //! @file editor.rs
 //!
 //! @version 2.0.1
-//! @author `BleckWolf25`
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Mouse-first, SFS-style VAB assembly editor with symmetry, snapping, and craft library
@@ -16,7 +16,9 @@
 //! remain for mastery.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -29,8 +31,8 @@ use crate::save_io::{
 use crate::shaders::PartMaterial;
 use crate::state::{ActiveBlueprint, GameMode, LivePartCatalog, part_style_id, uniform_border};
 use crate::ui_kit::{
-    BORDER_ON, BTN_BORDER, UI_ACCENT, UI_DIM, UI_OK, UI_TEXT, button_bundle, divider_bundle,
-    panel_bundle, text_button, Tooltip,
+    BORDER_ON, BTN_BORDER, Tooltip, UI_ACCENT, UI_DIM, UI_OK, UI_TEXT, button_bundle,
+    divider_bundle, panel_bundle, text_button,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
@@ -444,9 +446,13 @@ fn part_summary(spec: &PartSpec) -> String {
         ),
         PartKind::Fin(f) => write!(s, "\nStabilising fin, lift area {:.2} m2", f.lift_area_m2),
         PartKind::Rcs(r) => write!(s, "\nRCS {:.0} N | Isp {:.0} s", r.thrust_n, r.isp_s),
-        PartKind::Parachute(p) => write!(s, "\nDeployed drag area {:.0} m2", p.deployed_drag_area_m2),
+        PartKind::Parachute(p) => {
+            write!(s, "\nDeployed drag area {:.0} m2", p.deployed_drag_area_m2)
+        }
         PartKind::HeatShield(h) => write!(s, "\nAblator {:.0} kg", h.ablator_kg),
-        PartKind::LandingLeg(l) => write!(s, "\nSurvives {:.1} m/s touchdown", l.impact_tolerance_m_s),
+        PartKind::LandingLeg(l) => {
+            write!(s, "\nSurvives {:.1} m/s touchdown", l.impact_tolerance_m_s)
+        }
         PartKind::NoseCone(n) => write!(s, "\nDrag reduction {:.0}%", n.drag_reduction * 100.0),
     };
     let mut nodes = Vec::new();
@@ -719,14 +725,42 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
         ))
         .with_children(|bar| {
             let tools = [
-                ("Rot+", "Rotate +15 deg [Q]  (Shift+Q: 90 deg)", AttachAction::RotateLeft),
-                ("Rot-", "Rotate -15 deg [E]  (Shift+E: 90 deg)", AttachAction::RotateRight),
-                ("Flip", "Mirror the part left/right [F]", AttachAction::FlipMirror),
-                ("Copy", "Clone this part and everything attached below it [Ctrl+D]", AttachAction::DuplicateSelected),
-                ("CF", "Toggle fuel crossfeed through this decoupler", AttachAction::ToggleCrossfeed),
-                ("S-", "Move to an earlier stage [ [ ]", AttachAction::StageDown),
+                (
+                    "Rot+",
+                    "Rotate +15 deg [Q]  (Shift+Q: 90 deg)",
+                    AttachAction::RotateLeft,
+                ),
+                (
+                    "Rot-",
+                    "Rotate -15 deg [E]  (Shift+E: 90 deg)",
+                    AttachAction::RotateRight,
+                ),
+                (
+                    "Flip",
+                    "Mirror the part left/right [F]",
+                    AttachAction::FlipMirror,
+                ),
+                (
+                    "Copy",
+                    "Clone this part and everything attached below it [Ctrl+D]",
+                    AttachAction::DuplicateSelected,
+                ),
+                (
+                    "CF",
+                    "Toggle fuel crossfeed through this decoupler",
+                    AttachAction::ToggleCrossfeed,
+                ),
+                (
+                    "S-",
+                    "Move to an earlier stage [ [ ]",
+                    AttachAction::StageDown,
+                ),
                 ("S+", "Move to a later stage [ ] ]", AttachAction::StageUp),
-                ("Del", "Delete part and its attachments [Del] (right-click also deletes)", AttachAction::DeleteSelected),
+                (
+                    "Del",
+                    "Delete part and its attachments [Del] (right-click also deletes)",
+                    AttachAction::DeleteSelected,
+                ),
             ];
             for (label, tip, action) in tools {
                 let mut b = text_button(bar, label, tip, Some(38.0));
@@ -808,8 +842,16 @@ fn spawn_editor_ui(commands: &mut Commands<'_, '_>, icons: &PartIconRegistry) {
                             })
                             .with_children(|row| {
                                 for (label, tip, action) in [
-                                    ("Preset: Selene", "Load the lunar-capable Selene Explorer III", AttachAction::LoadLunarPreset),
-                                    ("Preset: Kepler-I", "Load the two-stage Kepler-I orbital rocket", AttachAction::ResetStarter),
+                                    (
+                                        "Preset: Moon",
+                                        "Load the lunar-capable Moon Explorer III",
+                                        AttachAction::LoadLunarPreset,
+                                    ),
+                                    (
+                                        "Preset: Kepler-I",
+                                        "Load the two-stage Kepler-I orbital rocket",
+                                        AttachAction::ResetStarter,
+                                    ),
                                 ] {
                                     let mut b = text_button(row, label, tip, Some(150.0));
                                     bind_action(&mut b, action);
@@ -2332,7 +2374,7 @@ fn apply_editor_action(
             active_bp.blueprint = lunar_capable_blueprint(&catalog.sim_catalog);
             active_bp.selected_part_id = active_bp.blueprint.parts.first().map(|p| p.instance_id);
             active_bp.dirty = true;
-            ed_state.status_note = String::from("Loaded Selene Explorer III preset.");
+            ed_state.status_note = String::from("Loaded Moon Explorer III preset.");
         }
         AttachAction::ResetStarter => {
             ed_state.record_undo(&active_bp.blueprint);
@@ -2752,7 +2794,11 @@ fn draw_editor_gizmos(
     }
 }
 
-fn editor_hint(active_bp: &ActiveBlueprint, catalog: &LivePartCatalog, ed_state: &EditorState) -> String {
+fn editor_hint(
+    active_bp: &ActiveBlueprint,
+    catalog: &LivePartCatalog,
+    ed_state: &EditorState,
+) -> String {
     let name_of = |id: &str| {
         catalog
             .sim_catalog

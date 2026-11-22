@@ -1,6 +1,6 @@
 //! @file main.rs
 //!
-//! @version 1.2.1
+//! @version 1.3.0
 //! @author `BleckWolf25`
 //! @license MIT
 //!
@@ -12,17 +12,11 @@
 //! categorized freeform VAB editor, and full cislunar N-body flight.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
-
+//! @updated 22/11/2026
 // ---------- IMPORTS
-
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
-
-// ---------- CONSTANTS
-
-// ---------- TYPES
 
 // ---------- DECLARATIONS / IMPLEMENTATION
 
@@ -46,7 +40,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: String::from("Kepler Yard - Orbital Foundry"),
+                        title: String::from("Kepler Yard"),
                         resolution: WindowResolution::new(1520, 940),
                         ..default()
                     }),

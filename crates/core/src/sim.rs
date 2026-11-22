@@ -1,7 +1,7 @@
 //! @file sim.rs
 //!
-//! @version 1.2.0
-//! @author `BleckWolf25`
+//! @version 1.3.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Full N-body symplectic simulator with ablative shielding, rotational contacts, and transfers
@@ -9,23 +9,25 @@
 //! @description
 //! Implements `SimWorld` with fixed 1/120 s symplectic Velocity Verlet substeps under thrust,
 //! atmospheric flight, or contact, adaptive coast steps during time warp, barycentric Kepler Prime
-//! and Selene gravitation, aerodynamic fin lift and nosecone drag reduction, convective reentry
+//! and Moon gravitation, aerodynamic fin lift and nosecone drag reduction, convective reentry
 //! heating with ablator burnoff and lateral wake occlusion, rotational rigid-body surface contacts
 //! with part-level impact breakup, and trajectory + maneuver transfer prediction.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
-
-use crate::body::{CelestialBody, OrbitElements, dominant_body, dominant_body_elements};
+use crate::body::{
+    CelestialBody, CelestialCatalog, OrbitElements, dominant_body, dominant_body_elements,
+};
 use crate::math::{DVec2, GRAV_CONSTANT, TAU_F64};
 use crate::parts::{PartKind, VesselBlueprint};
 use crate::vessel::{AMBIENT_TEMP_K, SasMode, SimError, StagingOutcome, Vessel, VesselId};
 use std::collections::HashMap;
 
 // ---------- CONSTANTS
-
 /// Nominal fixed physics substep duration (1/120 s).
 pub const FIXED_SUBSTEP_DT: f64 = 1.0 / 120.0;
 
@@ -129,7 +131,6 @@ struct BodyPoint {
 }
 
 // ---------- DECLARATIONS / IMPLEMENTATION
-
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
@@ -170,7 +171,7 @@ impl SimWorld {
         }
     }
 
-    /// Creates a single-body launchpad sandbox around Kepler Prime (without Selene).
+    /// Creates a single-body launchpad sandbox around Kepler Prime (without the Moon).
     ///
     /// # Errors
     ///
@@ -191,7 +192,7 @@ impl SimWorld {
         Ok(world)
     }
 
-    /// Creates the barycentric two-body Kepler system (Kepler Prime + Moon Selene) with
+    /// Creates the barycentric two-body Kepler system (Kepler Prime + Moon) with
     /// the vessel placed upright on Kepler Prime's launchpad.
     ///
     /// # Errors
@@ -202,7 +203,10 @@ impl SimWorld {
         catalog: &crate::parts::PartCatalog,
     ) -> Result<Self, SimError> {
         let mut world = Self::new();
-        let [planet, moon] = CelestialBody::kepler_selene_system();
+        let catalog_bodies = CelestialCatalog::kepler_moon().build_system();
+        let [planet, moon]: [CelestialBody; 2] = catalog_bodies
+            .try_into()
+            .map_err(|_| SimError::EmptyBlueprint)?;
         let mut vessel = Vessel::from_blueprint(world.next_vessel_id, bp, catalog)?;
         world.next_vessel_id += 1;
         vessel.place_on_north_pole_with_vel(planet.pos, planet.vel, planet.radius_m);
@@ -533,7 +537,7 @@ impl SimWorld {
     }
 
     /// Predicts both the current coast trajectory and an optional impulsive maneuver transfer trajectory,
-    /// including Selene encounter / closest-approach diagnostics, maneuver node location, and ghost moon positions.
+    /// including Moon encounter / closest-approach diagnostics, maneuver node location, and ghost moon positions.
     #[must_use]
     pub fn predict_trajectory_with_plan(
         &self,
@@ -1312,7 +1316,7 @@ mod tests {
     fn three_body_mutual_gravity_conserves_energy_and_momenta() {
         let mut world = SimWorld::new();
         let planet = CelestialBody::kepler_prime();
-        let moon = CelestialBody::selene(&planet);
+        let moon = CelestialBody::moon(&planet);
 
         let cat = default_part_catalog();
         let bp = starter_two_stage_blueprint(&cat);
@@ -1466,7 +1470,7 @@ mod tests {
 
     #[test]
     fn trajectory_prediction_continues_after_long_lead_maneuver() {
-        let [planet, moon] = CelestialBody::kepler_selene_system();
+        let [planet, moon] = CelestialBody::kepler_moon_system();
         let r_p = planet.radius_m + 100_000.0;
         let v_p = (planet.mu() / r_p).sqrt();
 

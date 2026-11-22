@@ -1,7 +1,7 @@
 //! @file flight.rs
 //!
-//! @version 1.3.1
-//! @author `BleckWolf25`
+//! @version 1.4.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Flight simulation coordinator with SFS part shaders, throat glow, FX, HUD, and save/load
@@ -13,7 +13,9 @@
 //! parallax starfield/launchpad FX, and the 2D Navball HUD.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -301,9 +303,9 @@ fn enter_flight(
     }
     spawn_flight_hud_ui(&mut commands);
 
-    let pred = world
-        .active_vessel_id
-        .map_or_default(|id| world.predict_trajectory_with_plan(id, PredictionOptions::default(), None));
+    let pred = world.active_vessel_id.map_or_default(|id| {
+        world.predict_trajectory_with_plan(id, PredictionOptions::default(), None)
+    });
 
     commands.insert_resource(FlightSimState {
         world,
@@ -675,7 +677,7 @@ fn step_flight_controls_and_physics(
             prograde_dv_m_s: est.dv1_m_s,
             radial_dv_m_s: 0.0,
         };
-        flight.status_banner = String::from("Planned Hohmann TLI maneuver to Selene.");
+        flight.status_banner = String::from("Planned Hohmann TLI maneuver to Moon.");
     }
     if keys.just_pressed(KeyCode::KeyV) {
         flight.maneuver.enabled = false;
@@ -894,14 +896,11 @@ fn step_flight_controls_and_physics(
     if flight.pred_tick >= PREDICTION_REFRESH_FRAMES || flight.maneuver.enabled {
         flight.pred_tick = 0;
         let plan_opt = flight.maneuver.enabled.then_some(flight.maneuver);
-        flight.last_prediction = flight
-            .world
-            .active_vessel_id
-            .map_or_default(|id| {
-                flight
-                    .world
-                    .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
-            });
+        flight.last_prediction = flight.world.active_vessel_id.map_or_default(|id| {
+            flight
+                .world
+                .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
+        });
     }
 }
 
