@@ -1,6 +1,6 @@
 //! @file parts.rs
 //!
-//! @version 1.3.1
+//! @version 1.4.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -95,6 +95,51 @@ pub struct EngineSpec {
     pub max_thrust_n: f64,
     pub isp_s: f64,
     pub gimbal_range_rad: f64,
+    pub sea_level_thrust_n: Option<f64>,
+    pub sea_level_isp_s: Option<f64>,
+    pub vacuum_isp_s: Option<f64>,
+}
+
+impl EngineSpec {
+    /// Vacuum Isp, falling back to the existing Isp field for catalog compatibility.
+    #[must_use]
+    pub fn vacuum_isp_s(self) -> f64 {
+        self.vacuum_isp_s.unwrap_or(self.isp_s).max(0.0)
+    }
+
+    /// Sea-level Isp, falling back to the vacuum Isp.
+    #[must_use]
+    pub fn sea_level_isp_s(self) -> f64 {
+        self.sea_level_isp_s
+            .unwrap_or_else(|| self.vacuum_isp_s())
+            .max(0.0)
+    }
+
+    /// Sea-level thrust, falling back to the existing maximum-thrust field.
+    #[must_use]
+    pub fn sea_level_thrust_n(self) -> f64 {
+        self.sea_level_thrust_n
+            .unwrap_or(self.max_thrust_n)
+            .max(0.0)
+    }
+
+    /// Linearly interpolates sea-level-to-vacuum thrust for ambient pressure.
+    #[must_use]
+    pub fn thrust_at_pressure_n(self, ambient_pressure_pa: f64) -> f64 {
+        let sea = self.sea_level_thrust_n();
+        let vacuum = self.max_thrust_n.max(0.0);
+        let fraction = (ambient_pressure_pa / 101_325.0).clamp(0.0, 1.0);
+        vacuum + (sea - vacuum) * fraction
+    }
+
+    /// Linearly interpolates sea-level-to-vacuum Isp for ambient pressure.
+    #[must_use]
+    pub fn isp_at_pressure_s(self, ambient_pressure_pa: f64) -> f64 {
+        let sea = self.sea_level_isp_s();
+        let vacuum = self.vacuum_isp_s();
+        let fraction = (ambient_pressure_pa / 101_325.0).clamp(0.0, 1.0);
+        vacuum + (sea - vacuum) * fraction
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -777,6 +822,9 @@ pub fn default_part_catalog() -> PartCatalog {
             max_thrust_n: 28_000.0,
             isp_s: 340.0,
             gimbal_range_rad: 0.08,
+            sea_level_thrust_n: None,
+            sea_level_isp_s: None,
+            vacuum_isp_s: None,
         }),
         stack_top: true,
         stack_bottom: true,
@@ -800,6 +848,9 @@ pub fn default_part_catalog() -> PartCatalog {
             max_thrust_n: 110_000.0,
             isp_s: 295.0,
             gimbal_range_rad: 0.06,
+            sea_level_thrust_n: None,
+            sea_level_isp_s: None,
+            vacuum_isp_s: None,
         }),
         stack_top: true,
         stack_bottom: false,
@@ -823,6 +874,9 @@ pub fn default_part_catalog() -> PartCatalog {
             max_thrust_n: 240_000.0,
             isp_s: 310.0,
             gimbal_range_rad: 0.07,
+            sea_level_thrust_n: None,
+            sea_level_isp_s: None,
+            vacuum_isp_s: None,
         }),
         stack_top: true,
         stack_bottom: false,
@@ -1665,5 +1719,22 @@ mod tests {
         );
         let analysis = analyze_blueprint(&bp, &cat);
         assert!((analysis.stages[0].fuel_kg - 2_400.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn engine_performance_interpolates_sea_level_and_vacuum() {
+        let engine = EngineSpec {
+            max_thrust_n: 100_000.0,
+            isp_s: 300.0,
+            gimbal_range_rad: 0.05,
+            sea_level_thrust_n: Some(80_000.0),
+            sea_level_isp_s: Some(260.0),
+            vacuum_isp_s: Some(300.0),
+        };
+        assert!((engine.thrust_at_pressure_n(101_325.0) - 80_000.0).abs() < 1.0e-9);
+        assert!((engine.thrust_at_pressure_n(0.0) - 100_000.0).abs() < 1.0e-9);
+        assert!((engine.isp_at_pressure_s(101_325.0) - 260.0).abs() < 1.0e-9);
+        assert!((engine.isp_at_pressure_s(0.0) - 300.0).abs() < 1.0e-9);
+        assert!((engine.thrust_at_pressure_n(50_662.5) - 90_000.0).abs() < 1.0e-9);
     }
 }

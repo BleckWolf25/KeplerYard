@@ -1,6 +1,6 @@
 //! @file sim.rs
 //!
-//! @version 1.4.0
+//! @version 1.5.0
 //! @author BleckWolf25
 //! @license MIT
 //!
@@ -408,7 +408,8 @@ impl SimWorld {
         for (vessel, target) in self.vessels.iter_mut().zip(target_angles) {
             if !vessel.crashed {
                 vessel.control.sas_target_angle = target;
-                vessel.prepare_step_throttles(dt);
+                let pressure_pa = ambient_pressure_at(vessel.pos, &self.bodies);
+                vessel.prepare_step_throttles_at_pressure(dt, pressure_pa);
             }
         }
 
@@ -438,7 +439,8 @@ impl SimWorld {
             vessel.pos += vh * dt;
             vessel.angle += wh * dt;
             vessel.wrap_angle();
-            vessel.consume_propellant(dt);
+            let pressure_pa = ambient_pressure_at(vessel.pos, &self.bodies);
+            vessel.consume_propellant_at_pressure(dt, pressure_pa);
 
             vessel_velocity_halfstep.push(vh);
             vessel_angular_velocity_halfstep.push(wh);
@@ -872,7 +874,9 @@ impl SimWorld {
             if vessel.crashed {
                 continue;
             }
-            let (mut force, mut torque) = vessel.compute_thrust_and_control_wrench();
+            let pressure_pa = ambient_pressure_at(vessel.pos, &self.bodies);
+            let (mut force, mut torque) =
+                vessel.compute_thrust_and_control_wrench_at_pressure(pressure_pa);
 
             if self.config.atmosphere_drag {
                 let (aero_f, aero_t) = compute_vessel_aerodynamics(vessel, &self.bodies);
@@ -1198,6 +1202,19 @@ fn compute_coast_accelerations(bodies: &[BodyPoint], v_pos: DVec2) -> (Vec<DVec2
     }
 
     (b_acc, v_acc)
+}
+
+/// Returns the strongest nearby body's ideal-gas surface pressure at the vessel position.
+fn ambient_pressure_at(position: DVec2, bodies: &[CelestialBody]) -> f64 {
+    bodies
+        .iter()
+        .filter_map(|body| {
+            let atmosphere = body.atmosphere?;
+            let altitude_m = position.distance(body.pos) - body.radius_m;
+            let state = atmosphere.state_at(altitude_m);
+            (state.density_kg_m3 > 0.0).then_some(state.pressure_pa)
+        })
+        .fold(0.0, f64::max)
 }
 
 /// Computes exponential atmospheric drag, nosecone drag relief, fin lift, and parachute drag.

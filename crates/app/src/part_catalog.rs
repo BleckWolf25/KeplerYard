@@ -1,7 +1,7 @@
-//! @file `part_catalog.rs`
+//! @file part_catalog.rs
 //!
-//! @version 1.3.0
-//! @author `BleckWolf25`
+//! @version 1.4.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Hot-reloadable RON part asset discovery, loader, and live catalog synchronization
@@ -11,7 +11,9 @@
 //! `LandingStrut` silhouettes) and implements Bevy 0.20 `AssetLoader` for `PartSpecAsset`.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 use crate::state::{ActiveBlueprint, LivePartCatalog, PartVisualStyle};
@@ -134,6 +136,12 @@ pub enum PartKindRon {
         max_thrust_n: f64,
         isp_s: f64,
         gimbal_range_rad: f64,
+        #[serde(default)]
+        sea_level_thrust_n: Option<f64>,
+        #[serde(default)]
+        sea_level_isp_s: Option<f64>,
+        #[serde(default)]
+        vacuum_isp_s: Option<f64>,
     },
     SolidBooster {
         max_thrust_n: f64,
@@ -318,10 +326,16 @@ impl From<PartKindRon> for PartKind {
                 max_thrust_n,
                 isp_s,
                 gimbal_range_rad,
+                sea_level_thrust_n,
+                sea_level_isp_s,
+                vacuum_isp_s,
             } => Self::Engine(EngineSpec {
                 max_thrust_n,
                 isp_s,
                 gimbal_range_rad,
+                sea_level_thrust_n,
+                sea_level_isp_s,
+                vacuum_isp_s,
             }),
             PartKindRon::SolidBooster {
                 max_thrust_n,

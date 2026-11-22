@@ -1,7 +1,7 @@
 //! @file vessel.rs
 //!
-//! @version 1.3.0
-//! @author `BleckWolf25`
+//! @version 1.4.0
+//! @author BleckWolf25
 //! @license MIT
 //!
 //! @summary Runtime vessel rigid body, SAS hold modes, RCS, SRBs, ablator, and mirrored parts
@@ -12,7 +12,9 @@
 //! reentry temperatures, ablator mass, and parachutes, and handles decoupler splits.
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
+// The project header uses bare author metadata rather than doc-markdown code formatting.
+#![allow(clippy::doc_markdown)]
 
 // ---------- IMPORTS
 
@@ -678,8 +680,12 @@ impl Vessel {
     }
 
     pub fn prepare_step_throttles(&mut self, dt: f64) {
+        self.prepare_step_throttles_at_pressure(dt, 0.0);
+    }
+
+    pub fn prepare_step_throttles_at_pressure(&mut self, dt: f64, ambient_pressure_pa: f64) {
         let mut scratch_fuel: Vec<f64> = self.parts.iter().map(|p| p.fuel_kg).collect();
-        let _ = self.apply_propellant_step(dt, &mut scratch_fuel);
+        let _ = self.apply_propellant_step(dt, &mut scratch_fuel, ambient_pressure_pa);
         let steer_cmd = self.effective_steer_command();
         for p in &mut self.parts {
             p.active_gimbal_rad = if let PartKind::Engine(eng) = p.spec.kind
@@ -696,8 +702,12 @@ impl Vessel {
     }
 
     pub fn consume_propellant(&mut self, dt: f64) {
+        self.consume_propellant_at_pressure(dt, 0.0);
+    }
+
+    pub fn consume_propellant_at_pressure(&mut self, dt: f64, ambient_pressure_pa: f64) {
         let mut live_fuel: Vec<f64> = self.parts.iter().map(|p| p.fuel_kg).collect();
-        let changed = self.apply_propellant_step(dt, &mut live_fuel);
+        let changed = self.apply_propellant_step(dt, &mut live_fuel, ambient_pressure_pa);
         if changed {
             for (part, f) in self.parts.iter_mut().zip(live_fuel) {
                 part.fuel_kg = f;
@@ -707,7 +717,12 @@ impl Vessel {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn apply_propellant_step(&mut self, dt: f64, fuel_pool: &mut [f64]) -> bool {
+    fn apply_propellant_step(
+        &mut self,
+        dt: f64,
+        fuel_pool: &mut [f64],
+        ambient_pressure_pa: f64,
+    ) -> bool {
         let cmd_throttle = if self.is_debris || self.crashed {
             0.0
         } else {
@@ -782,7 +797,10 @@ impl Vessel {
                     continue;
                 }
 
-                let mdot_requested = (eng_spec.max_thrust_n * cmd_throttle) / (eng_spec.isp_s * G0);
+                let effective_thrust_n = eng_spec.thrust_at_pressure_n(ambient_pressure_pa);
+                let effective_isp_s = eng_spec.isp_at_pressure_s(ambient_pressure_pa);
+                let mdot_requested =
+                    (effective_thrust_n * cmd_throttle) / (effective_isp_s * G0).max(1.0e-12);
                 let dm_requested = mdot_requested * dt;
                 if dm_requested <= 0.0 {
                     continue;
@@ -910,6 +928,14 @@ impl Vessel {
 
     #[must_use]
     pub fn compute_thrust_and_control_wrench(&self) -> (DVec2, f64) {
+        self.compute_thrust_and_control_wrench_at_pressure(0.0)
+    }
+
+    #[must_use]
+    pub fn compute_thrust_and_control_wrench_at_pressure(
+        &self,
+        ambient_pressure_pa: f64,
+    ) -> (DVec2, f64) {
         let mut net_force = DVec2::ZERO;
         let mut net_torque = 0.0;
 
@@ -923,7 +949,8 @@ impl Vessel {
                     let lever_sign = if r_local.y <= 0.0 { -1.0 } else { 1.0 };
                     let gimbal_angle = total_steer * eng.gimbal_range_rad * lever_sign;
                     let local_thrust_dir = DVec2::Y.rotate(part.local_rot + gimbal_angle);
-                    let force_local = local_thrust_dir * (eng.max_thrust_n * part.active_throttle);
+                    let thrust_n = eng.thrust_at_pressure_n(ambient_pressure_pa);
+                    let force_local = local_thrust_dir * (thrust_n * part.active_throttle);
                     net_torque += r_local.cross(force_local);
                     net_force += force_local.rotate(self.angle);
                 }
