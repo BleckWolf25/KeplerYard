@@ -21,6 +21,7 @@ use kepler_core::{
     save_blueprint_bytes, save_world_bytes,
 };
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 // ---------- CONSTANTS
@@ -51,6 +52,7 @@ pub fn save_directory() -> Result<PathBuf, String> {
         })
         .or_else(|| {
             std::env::var_os("XDG_DATA_HOME")
+                .filter(|xdg| !xdg.is_empty())
                 .map(|xdg| PathBuf::from(xdg).join("kepler_yard").join("saves"))
         })
         .or_else(|| {
@@ -96,18 +98,67 @@ pub fn slugify_craft_name(name: &str) -> String {
     }
 }
 
+/// Writes `bytes` to `path` via a temporary sibling file and an atomic rename, so a crash or full
+/// disk mid-write can never leave a truncated save behind.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp_name = path.file_name().map(std::ffi::OsString::from).unwrap_or_default();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
+}
+
+/// Stable FNV-1a hash used to give names with no ASCII characters a distinct file name.
+fn fnv1a_32(text: &str) -> u32 {
+    text.bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// Picks the file for `name`, never overwriting a different craft that slugs to the same name.
+fn unique_craft_path(dir: &Path, name: &str) -> PathBuf {
+    let base = if slugify_craft_name(name) == "unnamed_craft" {
+        format!("craft_{:08x}", fnv1a_32(name))
+    } else {
+        slugify_craft_name(name)
+    };
+    for n in 1_u32..1000 {
+        let file = if n == 1 {
+            format!("{base}.kyc")
+        } else {
+            format!("{base}_{n}.kyc")
+        };
+        let path = dir.join(file);
+        if !path.exists() {
+            return path;
+        }
+        // Same craft name: overwrite in place. Different name: keep looking.
+        if load_craft_from_path(&path).is_ok_and(|existing| existing.name == name) {
+            return path;
+        }
+    }
+    dir.join(format!("{base}_{:08x}.kyc", fnv1a_32(name)))
+}
+
 pub fn save_quicksave(world: &SimWorld, plan: ManeuverPlan) -> Result<PathBuf, String> {
     let dir = save_directory()?;
     let path = dir.join(QUICKSAVE_FILE);
     let bytes = save_world_bytes(world);
-    fs::write(&path, bytes).map_err(|e| format!("failed to write quicksave: {e}"))?;
+    write_atomic(&path, &bytes).map_err(|e| format!("failed to write quicksave: {e}"))?;
 
     let mut plan_bytes = Vec::with_capacity(25);
     plan_bytes.push(u8::from(plan.enabled));
     plan_bytes.extend_from_slice(&plan.lead_time_s.to_bits().to_le_bytes());
     plan_bytes.extend_from_slice(&plan.prograde_dv_m_s.to_bits().to_le_bytes());
     plan_bytes.extend_from_slice(&plan.radial_dv_m_s.to_bits().to_le_bytes());
-    let _ = fs::write(dir.join(QUICKSAVE_MANEUVER_FILE), plan_bytes);
+    write_atomic(&dir.join(QUICKSAVE_MANEUVER_FILE), &plan_bytes)
+        .map_err(|e| format!("failed to write maneuver plan: {e}"))?;
     Ok(path)
 }
 
@@ -124,11 +175,20 @@ pub fn load_quicksave() -> Result<(SimWorld, ManeuverPlan), String> {
             pb[9..17].try_into(),
             pb[17..25].try_into(),
         ) {
-        ManeuverPlan {
-            enabled: pb[0] != 0,
-            lead_time_s: f64::from_le_bytes(a),
-            prograde_dv_m_s: f64::from_le_bytes(b),
-            radial_dv_m_s: f64::from_le_bytes(c),
+        let (lead, pro, rad) = (
+            f64::from_le_bytes(a),
+            f64::from_le_bytes(b),
+            f64::from_le_bytes(c),
+        );
+        if lead.is_finite() && lead >= 0.0 && pro.is_finite() && rad.is_finite() {
+            ManeuverPlan {
+                enabled: pb[0] != 0,
+                lead_time_s: lead,
+                prograde_dv_m_s: pro,
+                radial_dv_m_s: rad,
+            }
+        } else {
+            ManeuverPlan::default()
         }
     } else {
         ManeuverPlan::default()
@@ -138,10 +198,9 @@ pub fn load_quicksave() -> Result<(SimWorld, ManeuverPlan), String> {
 }
 
 pub fn save_craft_blueprint(bp: &VesselBlueprint) -> Result<PathBuf, String> {
-    let slug = slugify_craft_name(&bp.name);
-    let path = crafts_directory()?.join(format!("{slug}.kyc"));
+    let path = unique_craft_path(&crafts_directory()?, &bp.name);
     let bytes = save_blueprint_bytes(bp);
-    fs::write(&path, bytes).map_err(|e| format!("failed to save craft: {e}"))?;
+    write_atomic(&path, &bytes).map_err(|e| format!("failed to save craft: {e}"))?;
     Ok(path)
 }
 
@@ -197,14 +256,18 @@ pub fn save_quicksave_slot(
     }
     let dir = save_directory()?;
     let path = dir.join(format!("slot_{slot}.kyw"));
-    fs::write(&path, save_world_bytes(world))
+    write_atomic(&path, &save_world_bytes(world))
         .map_err(|e| format!("failed to write save slot {slot}: {e}"))?;
     let mut plan_bytes = Vec::with_capacity(25);
     plan_bytes.push(u8::from(plan.enabled));
     plan_bytes.extend_from_slice(&plan.lead_time_s.to_bits().to_le_bytes());
     plan_bytes.extend_from_slice(&plan.prograde_dv_m_s.to_bits().to_le_bytes());
     plan_bytes.extend_from_slice(&plan.radial_dv_m_s.to_bits().to_le_bytes());
-    let _ = fs::write(dir.join(format!("slot_{slot}.kym")), plan_bytes);
+    write_atomic(
+        &dir.join(format!("slot_{slot}.kym")),
+        &plan_bytes,
+    )
+    .map_err(|e| format!("failed to write maneuver plan for slot {slot}: {e}"))?;
     Ok(path)
 }
 
@@ -224,11 +287,20 @@ pub fn load_quicksave_slot(slot: u8) -> Result<(SimWorld, ManeuverPlan), String>
             pb[9..17].try_into(),
             pb[17..25].try_into(),
         ) {
-        ManeuverPlan {
-            enabled: pb[0] != 0,
-            lead_time_s: f64::from_le_bytes(a),
-            prograde_dv_m_s: f64::from_le_bytes(b),
-            radial_dv_m_s: f64::from_le_bytes(c),
+        let (lead, pro, rad) = (
+            f64::from_le_bytes(a),
+            f64::from_le_bytes(b),
+            f64::from_le_bytes(c),
+        );
+        if lead.is_finite() && lead >= 0.0 && pro.is_finite() && rad.is_finite() {
+            ManeuverPlan {
+                enabled: pb[0] != 0,
+                lead_time_s: lead,
+                prograde_dv_m_s: pro,
+                radial_dv_m_s: rad,
+            }
+        } else {
+            ManeuverPlan::default()
         }
     } else {
         ManeuverPlan::default()
@@ -261,6 +333,67 @@ pub fn load_settings() -> Result<(bool, bool), String> {
         }
     }
     Ok((fullscreen, tutorial))
+}
+
+// ---------- TESTS
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kepler_yard_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn blueprint(name: &str) -> VesselBlueprint {
+        VesselBlueprint {
+            name: name.to_owned(),
+            parts: Vec::new(),
+            next_instance_id: 1,
+        }
+    }
+
+    fn save_to(dir: &Path, bp: &VesselBlueprint) -> PathBuf {
+        let path = unique_craft_path(dir, &bp.name);
+        write_atomic(&path, &save_blueprint_bytes(bp)).expect("write craft");
+        path
+    }
+
+    #[test]
+    fn crafts_with_colliding_slugs_do_not_overwrite_each_other() {
+        let dir = temp_dir("slug");
+        let a = save_to(&dir, &blueprint("My Rocket!"));
+        let b = save_to(&dir, &blueprint("my rocket"));
+        assert_ne!(a, b);
+        // Saving the same craft again reuses its own file.
+        assert_eq!(save_to(&dir, &blueprint("My Rocket!")), a);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_ascii_names_get_distinct_files() {
+        let dir = temp_dir("unicode");
+        let a = save_to(&dir, &blueprint("火箭"));
+        let b = save_to(&dir, &blueprint("ロケット"));
+        assert_ne!(a, b);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_temp_file() {
+        let dir = temp_dir("atomic");
+        let path = dir.join("quicksave.kyw");
+        write_atomic(&path, b"first").expect("first write");
+        write_atomic(&path, b"second").expect("second write");
+        assert_eq!(fs::read(&path).expect("read back"), b"second");
+        assert!(!dir.join("quicksave.kyw.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 // ---------- EXPORTS

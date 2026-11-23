@@ -68,7 +68,7 @@ This project is built using **Rust**, **Bevy 0.20**, **RON** (`.part.ron` & `.ky
 
 ### Prerequisites
 
-- **Rust** 1.85 or higher (`rustup default stable`)
+- **Rust** 1.97.1 or higher (`rustup default stable`)
 - **LLVM / `rust-lld`** linker (configured in `.cargo/config.toml`)
 - **Git**
 - **Recommended CLI tools:**

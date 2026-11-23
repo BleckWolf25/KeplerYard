@@ -43,6 +43,8 @@ pub enum SaveError {
     InvalidUtf8,
     InvalidTag(&'static str, u8),
     TrailingBytes,
+    /// A decoded value is non-finite, out of range, or refers to something that does not exist.
+    InvalidValue(&'static str),
 }
 
 struct Reader<'a> {
@@ -60,6 +62,7 @@ impl fmt::Display for SaveError {
             Self::InvalidUtf8 => write!(f, "invalid UTF-8 string in save data"),
             Self::InvalidTag(field, tag) => write!(f, "invalid {field} tag {tag} in save data"),
             Self::TrailingBytes => write!(f, "unexpected trailing bytes in save data"),
+            Self::InvalidValue(field) => write!(f, "invalid value for {field} in save data"),
         }
     }
 }
@@ -140,6 +143,9 @@ pub fn load_world_bytes(bytes: &[u8]) -> Result<SimWorld, SaveError> {
         return Err(SaveError::InvalidMagic);
     }
     let time_s = r.read_f64()?;
+    if !time_s.is_finite() {
+        return Err(SaveError::InvalidValue("time_s"));
+    }
     let active_vessel_id = r.read_opt_u64()?;
     let next_vessel_id = r.read_u64()?;
     let config = read_config(&mut r)?;
@@ -158,6 +164,11 @@ pub fn load_world_bytes(bytes: &[u8]) -> Result<SimWorld, SaveError> {
 
     if r.remaining() != 0 {
         return Err(SaveError::TrailingBytes);
+    }
+    if let Some(id) = active_vessel_id
+        && !vessels.iter().any(|v| v.id == id)
+    {
+        return Err(SaveError::InvalidValue("active_vessel_id"));
     }
 
     Ok(SimWorld {
@@ -796,7 +807,7 @@ fn read_vessel(r: &mut Reader<'_>) -> Result<Vessel, SaveError> {
     for _ in 0..count {
         parts.push(read_part_state(r)?);
     }
-    Ok(Vessel {
+    let vessel = Vessel {
         id,
         name,
         is_debris,
@@ -821,7 +832,37 @@ fn read_vessel(r: &mut Reader<'_>) -> Result<Vessel, SaveError> {
             rcs_enabled: r.read_bool()?,
             rcs_translate: r.read_dvec2()?,
         },
-    })
+    };
+    validate_vessel(&vessel)?;
+    Ok(vessel)
+}
+
+fn validate_vessel(v: &Vessel) -> Result<(), SaveError> {
+    let finite = |x: f64| x.is_finite();
+    let finite2 = |p: DVec2| p.x.is_finite() && p.y.is_finite();
+    if !finite2(v.pos) || !finite2(v.vel) {
+        return Err(SaveError::InvalidValue("vessel state"));
+    }
+    if !finite(v.angle) || !finite(v.angular_vel) {
+        return Err(SaveError::InvalidValue("vessel attitude"));
+    }
+    if !finite2(v.com_local) {
+        return Err(SaveError::InvalidValue("vessel center of mass"));
+    }
+    if !(finite(v.total_mass_kg) && v.total_mass_kg > 0.0) {
+        return Err(SaveError::InvalidValue("vessel mass"));
+    }
+    if !(finite(v.moi_kg_m2) && v.moi_kg_m2 > 0.0) {
+        return Err(SaveError::InvalidValue("vessel moment of inertia"));
+    }
+    let c = &v.control;
+    if !finite(c.throttle) || !finite(c.steer) || !finite2(c.rcs_translate) {
+        return Err(SaveError::InvalidValue("vessel controls"));
+    }
+    if c.sas_target_angle.is_some_and(|a| !finite(a)) {
+        return Err(SaveError::InvalidValue("vessel SAS target"));
+    }
+    Ok(())
 }
 
 // ---------- TESTS
@@ -888,6 +929,34 @@ mod tests {
         assert_eq!(
             va.peak_temperature_k().to_bits(),
             vb.peak_temperature_k().to_bits()
+        );
+    }
+
+    #[test]
+    fn world_load_rejects_non_finite_and_dangling_state() {
+        let cat = default_part_catalog();
+        let bp = lunar_capable_blueprint(&cat);
+        let world = SimWorld::with_kepler_system_vessel(&bp, &cat).expect("system world");
+
+        let mut bad_pos = world.clone();
+        bad_pos.active_vessel_mut().expect("vessel").pos.x = f64::NAN;
+        assert!(matches!(
+            load_world_bytes(&save_world_bytes(&bad_pos)),
+            Err(SaveError::InvalidValue(_))
+        ));
+
+        let mut bad_mass = world.clone();
+        bad_mass.active_vessel_mut().expect("vessel").total_mass_kg = 0.0;
+        assert!(matches!(
+            load_world_bytes(&save_world_bytes(&bad_mass)),
+            Err(SaveError::InvalidValue(_))
+        ));
+
+        let mut dangling = world;
+        dangling.active_vessel_id = Some(424_242);
+        assert_eq!(
+            load_world_bytes(&save_world_bytes(&dangling)),
+            Err(SaveError::InvalidValue("active_vessel_id"))
         );
     }
 }

@@ -85,6 +85,8 @@ pub struct FlightSimState {
     pub staging_count: u32,
     pub stage_requested: bool,
     pub throttle_override: Option<f64>,
+    /// Real time (scaled by warp) not yet consumed by whole fixed physics ticks.
+    tick_remainder_s: f64,
     pred_tick: u32,
 }
 
@@ -385,9 +387,10 @@ fn enter_flight(
     }
     spawn_flight_hud_ui(&mut commands);
 
-    let pred = world.active_vessel_id.map_or_default(|id| {
-        world.predict_trajectory_with_plan(id, PredictionOptions::default(), None)
-    });
+    let pred = world
+        .active_vessel_id
+        .map(|id| world.predict_trajectory_with_plan(id, PredictionOptions::default(), None))
+        .unwrap_or_default();
 
     commands.insert_resource(FlightSimState {
         world,
@@ -415,6 +418,7 @@ fn enter_flight(
         staging_count: 0,
         stage_requested: false,
         throttle_override: None,
+        tick_remainder_s: 0.0,
         pred_tick: 0,
     });
 }
@@ -652,6 +656,7 @@ fn step_flight_controls_and_physics(
         };
         if let Ok(new_world) = new_world {
             flight.world = new_world;
+            flight.tick_remainder_s = 0.0;
             flight.throttle = 1.0;
             flight.sas_enabled = true;
             flight.sas_mode = SasMode::Stability;
@@ -869,6 +874,7 @@ fn step_flight_controls_and_physics(
         match load_quicksave_slot(2) {
             Ok((loaded, plan)) => {
                 flight.world = loaded;
+                flight.tick_remainder_s = 0.0;
                 flight.maneuver = plan;
                 if let Some((ctrl, pos)) = flight.world.active_vessel().map(|v| (v.control, v.pos))
                 {
@@ -959,10 +965,21 @@ fn step_flight_controls_and_physics(
         flight.status_banner = String::from("Auto-dropped warp for maneuver node!");
     }
 
-    let sim_dt = dt_real * clock.warp_factor();
-    if sim_dt > 0.0 {
+    // Consume real time only in whole fixed ticks so the trajectory does not depend on frame
+    // timing; the fractional remainder carries over to the next frame.
+    let fixed_dt = flight.world.config.fixed_dt;
+    let ticks = if fixed_dt > 0.0 && fixed_dt.is_finite() {
+        flight.tick_remainder_s += dt_real * clock.warp_factor();
+        let whole = (flight.tick_remainder_s / fixed_dt).floor().clamp(0.0, f64::from(u32::MAX));
+        flight.tick_remainder_s -= whole * fixed_dt;
+        whole as u32
+    } else {
+        0
+    };
+    let sim_dt = f64::from(ticks) * fixed_dt;
+    if ticks > 0 {
         let plan_opt = flight.maneuver.enabled.then_some(flight.maneuver);
-        let events = flight.world.step_with_events(sim_dt, plan_opt);
+        let events = flight.world.step_ticks(ticks, plan_opt);
         for ev in events {
             match ev {
                 SimStepEvent::PartDestroyed { world_pos, thermal } => {
@@ -1122,11 +1139,15 @@ fn step_flight_controls_and_physics(
     if flight.pred_tick >= PREDICTION_REFRESH_FRAMES || flight.maneuver.enabled {
         flight.pred_tick = 0;
         let plan_opt = flight.maneuver.enabled.then_some(flight.maneuver);
-        flight.last_prediction = flight.world.active_vessel_id.map_or_default(|id| {
-            flight
-                .world
-                .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
-        });
+        flight.last_prediction = flight
+            .world
+            .active_vessel_id
+            .map(|id| {
+                flight
+                    .world
+                    .predict_trajectory_with_plan(id, PredictionOptions::default(), plan_opt)
+            })
+            .unwrap_or_default();
     }
 }
 

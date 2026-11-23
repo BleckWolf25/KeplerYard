@@ -22,7 +22,7 @@ KeplerYard combines an interactive Vehicle Assembly Building (VAB) with real-tim
 
 ### Prerequisites
 
-- **Rust** 1.85+ (stable MSVC toolchain on Windows)
+- **Rust** 1.97.1+ (stable MSVC toolchain on Windows). The `app` crate's dependencies (Bevy 0.20, `wesl`) require it; the dependency-free `core` crate alone builds on 1.88+ because it uses `let` chains.
 - **LLVM / `rust-lld`** (included via Visual Studio Build Tools or LLVM for fast linking)
 - **Git**
 - Optional dev tools:
@@ -36,7 +36,7 @@ KeplerYard combines an interactive Vehicle Assembly Building (VAB) with real-tim
 1. **Clone the repository:**
 
    ```bash
-   git clone [https://github.com/BleckWolf25/KeplerYard.git](https://github.com/BleckWolf25/KeplerYard.git)
+   git clone https://github.com/BleckWolf25/KeplerYard.git
    cd KeplerYard
    ```
 

@@ -288,7 +288,11 @@ impl SimWorld {
                             _ => false,
                         }
                 });
+            // Debris that has already come to rest cannot affect the active craft and must not pin
+            // the whole simulation to physical warp.
+            let settled_debris = v.is_debris && v.landed;
             let in_atmo_or_contact = !v.crashed
+                && !settled_debris
                 && self.bodies.iter().any(|b| {
                     let alt = v.pos.distance(b.pos) - b.radius_m;
                     let atmo_top = b.atmosphere.map_or(200.0, |a| a.max_altitude_m + 500.0);
@@ -296,7 +300,7 @@ impl SimWorld {
                 });
             let steering =
                 !v.is_debris && (v.control.steer.abs() > 1.0e-4 || v.angular_vel.abs() > 0.05);
-            thrusting || in_atmo_or_contact || steering || v.landed
+            thrusting || in_atmo_or_contact || steering || (v.landed && !settled_debris)
         })
     }
 
@@ -374,6 +378,32 @@ impl SimWorld {
             let dt = remaining.min(substep_limit);
             self.step_verlet_with_events(dt, maneuver, &mut events);
             remaining -= dt;
+        }
+        events
+    }
+
+    /// Advances the simulation by an exact whole number of fixed ticks.
+    ///
+    /// While [`Self::requires_physical_warp`] is true every substep is exactly `fixed_dt`, so the
+    /// result is bit-exact no matter how the ticks are split across calls (frame timing cannot
+    /// change the trajectory). Otherwise ticks are grouped into coarse coast substeps of at most
+    /// `max_coast_dt`, each an exact multiple of `fixed_dt`.
+    pub fn step_ticks(&mut self, ticks: u32, maneuver: Option<ManeuverPlan>) -> Vec<SimStepEvent> {
+        let mut events = Vec::new();
+        let fixed_dt = self.config.fixed_dt;
+        if ticks == 0 || fixed_dt <= 0.0 || !fixed_dt.is_finite() {
+            return events;
+        }
+        let ticks_per_coarse = if self.requires_physical_warp() {
+            1
+        } else {
+            ((self.config.max_coast_dt / fixed_dt).round() as u32).max(1)
+        };
+        let mut remaining = ticks;
+        while remaining > 0 {
+            let chunk = remaining.min(ticks_per_coarse);
+            self.step_verlet_with_events(f64::from(chunk) * fixed_dt, maneuver, &mut events);
+            remaining -= chunk;
         }
         events
     }
@@ -1132,6 +1162,8 @@ impl SimWorld {
                 }
 
                 if max_pen > 0.0 {
+                    let mass_kg = vessel.total_mass_kg.max(1.0e-6);
+                    let moi = vessel.moi_kg_m2.max(1.0e-3);
                     let approach_speed = (vessel.vel - body.vel).length();
                     vessel.pos += main_normal * max_pen;
 
@@ -1143,25 +1175,25 @@ impl SimWorld {
                             if v_n < 0.0 {
                                 let r_cn = r_world.cross(normal);
                                 let inv_mass_n =
-                                    1.0 / vessel.total_mass_kg + (r_cn * r_cn) / vessel.moi_kg_m2;
+                                    1.0 / mass_kg + (r_cn * r_cn) / moi;
                                 let j_n = -v_n / inv_mass_n.max(1.0e-9);
-                                vessel.vel += normal * (j_n / vessel.total_mass_kg);
-                                vessel.angular_vel += (r_cn * j_n) / vessel.moi_kg_m2;
+                                vessel.vel += normal * (j_n / mass_kg);
+                                vessel.angular_vel += (r_cn * j_n) / moi;
 
                                 let tangent = normal.perp();
                                 let v_pt_after =
                                     (vessel.vel - body.vel) + r_world.perp() * vessel.angular_vel;
                                 let tangential_speed = v_pt_after.dot(tangent);
                                 let contact_radius_tangent_cross = r_world.cross(tangent);
-                                let inv_mass_t = 1.0 / vessel.total_mass_kg
+                                let inv_mass_t = 1.0 / mass_kg
                                     + (contact_radius_tangent_cross * contact_radius_tangent_cross)
-                                        / vessel.moi_kg_m2;
+                                        / moi;
                                 let max_fric = 0.65 * j_n;
                                 let j_t = (-tangential_speed / inv_mass_t.max(1.0e-9))
                                     .clamp(-max_fric, max_fric);
-                                vessel.vel += tangent * (j_t / vessel.total_mass_kg);
+                                vessel.vel += tangent * (j_t / mass_kg);
                                 vessel.angular_vel +=
-                                    (contact_radius_tangent_cross * j_t) / vessel.moi_kg_m2;
+                                    (contact_radius_tangent_cross * j_t) / moi;
                             }
                         }
                     }
@@ -1310,7 +1342,9 @@ mod tests {
 
     use super::*;
     use crate::math::{G0, SplitMix64};
-    use crate::parts::{AttachKind, default_part_catalog, starter_two_stage_blueprint};
+    use crate::parts::{
+        AttachKind, default_part_catalog, lunar_capable_blueprint, starter_two_stage_blueprint,
+    };
 
     fn propagate_circular_orbit(mu: f64, radius_m: f64, dt_s: f64, steps: usize) -> DVec2 {
         let mut pos = DVec2::new(radius_m, 0.0);
@@ -1908,5 +1942,51 @@ mod tests {
             (coarse_error_m - reference_error_m).abs() < 1.0,
             "120 Hz={coarse_error_m:.3} m, 240 Hz={reference_error_m:.3} m"
         );
+    }
+
+    #[test]
+    fn step_ticks_is_bit_exact_regardless_of_call_partitioning() {
+        let cat = default_part_catalog();
+        let bp = lunar_capable_blueprint(&cat);
+        let mut a = SimWorld::with_kepler_system_vessel(&bp, &cat).expect("world a");
+        let mut b = SimWorld::with_kepler_system_vessel(&bp, &cat).expect("world b");
+        a.trigger_active_stage();
+        b.trigger_active_stage();
+        assert!(a.requires_physical_warp());
+
+        let _ = a.step_ticks(600, None);
+        for chunk in [1_u32, 7, 120, 3, 469] {
+            let _ = b.step_ticks(chunk, None);
+        }
+        let (va, vb) = (a.active_vessel().expect("a"), b.active_vessel().expect("b"));
+        assert_eq!(va.pos.x.to_bits(), vb.pos.x.to_bits());
+        assert_eq!(va.pos.y.to_bits(), vb.pos.y.to_bits());
+        assert_eq!(va.vel.x.to_bits(), vb.vel.x.to_bits());
+        assert_eq!(va.vel.y.to_bits(), vb.vel.y.to_bits());
+        assert_eq!(a.time_s.to_bits(), b.time_s.to_bits());
+    }
+
+    #[test]
+    fn settled_debris_does_not_force_physical_warp() {
+        let cat = default_part_catalog();
+        let bp = lunar_capable_blueprint(&cat);
+        let mut world = SimWorld::with_kepler_system_vessel(&bp, &cat).expect("world");
+        let mut debris = world.active_vessel().expect("vessel").clone();
+        debris.id = 999;
+        debris.is_debris = true;
+        debris.landed = true;
+        debris.crashed = false;
+        // Park the active craft far from every atmosphere and make it quiescent.
+        let far = world.bodies[0].pos + DVec2::new(world.bodies[0].radius_m * 40.0, 0.0);
+        let active = world.active_vessel_mut().expect("vessel");
+        active.pos = far;
+        active.landed = false;
+        active.angular_vel = 0.0;
+        active.control.steer = 0.0;
+        for p in &mut active.parts {
+            p.engine_active = false;
+        }
+        world.vessels.push(debris);
+        assert!(!world.requires_physical_warp());
     }
 }
