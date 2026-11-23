@@ -32,12 +32,13 @@ use crate::flight_hud::{
 use crate::procedural_mesh::{
     build_deployed_chute_mesh, build_part_mesh, build_plume_quad, build_reentry_quad,
 };
-use crate::save_io::{load_quicksave, save_quicksave};
+use crate::save_io::{load_quicksave, load_quicksave_slot, save_quicksave, save_quicksave_slot};
 use crate::shaders::{AtmosphereMaterial, PartMaterial, PlumeMaterial, ReentryMaterial};
 use crate::state::{
-    ActiveBlueprint, ActiveLaunchSystem, AudioCue, AudioCueQueue, CameraFocusState,
+    ActiveBlueprint, ActiveLaunchSystem, AppSettings, AudioCue, AudioCueQueue, CameraFocusState,
     CameraFocusTarget, FlightClock, FloatingOrigin, GameMode, LivePartCatalog,
-    PHYSICAL_WARP_MAX_INDEX, TIME_WARP_LEVELS, part_style_id, world_to_render_vec2,
+    PHYSICAL_WARP_MAX_INDEX, PendingFlightLoad, TIME_WARP_LEVELS, part_style_id,
+    world_to_render_vec2,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -80,6 +81,7 @@ pub struct FlightSimState {
     pub mission_phase: u8,
     pub mission_feedback: String,
     pub mission_feedback_timer_s: f64,
+    pub show_tutorial: bool,
     pub staging_count: u32,
     pub stage_requested: bool,
     pub throttle_override: Option<f64>,
@@ -339,6 +341,8 @@ fn enter_flight(
     active_bp: Res<'_, ActiveBlueprint>,
     catalog: Res<'_, LivePartCatalog>,
     launch_system: Res<'_, ActiveLaunchSystem>,
+    settings: Res<'_, AppSettings>,
+    pending: Option<Res<'_, PendingFlightLoad>>,
     mut clock: ResMut<'_, FlightClock>,
     mut origin: ResMut<'_, FloatingOrigin>,
     mut assets: FlightAssets<'_>,
@@ -347,21 +351,28 @@ fn enter_flight(
     clock.paused = false;
     clock.physical_capped = true;
 
-    let world = match *launch_system {
-        ActiveLaunchSystem::EarthMoon => {
-            SimWorld::with_earth_moon_vessel(&active_bp.blueprint, &catalog.sim_catalog)
-        }
-        ActiveLaunchSystem::KeplerMoon => {
-            SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
-        }
-    };
-    let world = match world {
-        Ok(w) => w,
-        Err(err) => {
-            error!("Failed to initialize flight simulation: {err}");
-            SimWorld::new()
-        }
-    };
+    let (world, pending_maneuver) = pending.map_or_else(
+        || {
+            let world = match *launch_system {
+                ActiveLaunchSystem::EarthMoon => {
+                    SimWorld::with_earth_moon_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+                }
+                ActiveLaunchSystem::KeplerMoon => {
+                    SimWorld::with_kepler_system_vessel(&active_bp.blueprint, &catalog.sim_catalog)
+                }
+            };
+            let world = match world {
+                Ok(world) => world,
+                Err(err) => {
+                    error!("Failed to initialize flight simulation: {err}");
+                    SimWorld::new()
+                }
+            };
+            (world, ManeuverPlan::default())
+        },
+        |pending| (pending.world.clone(), pending.maneuver),
+    );
+    commands.remove_resource::<PendingFlightLoad>();
 
     if let Some(active) = world.active_vessel() {
         origin.origin_m = active.pos;
@@ -384,7 +395,7 @@ fn enter_flight(
         sas_enabled: true,
         sas_mode: SasMode::Stability,
         rcs_enabled: false,
-        maneuver: ManeuverPlan::default(),
+        maneuver: pending_maneuver,
         transfer_est: None,
         last_prediction: pred,
         status_banner: format!("Ready on {} launchpad.", launch_system.label()),
@@ -400,6 +411,7 @@ fn enter_flight(
         mission_phase: 5,
         mission_feedback: String::from("Launch ready"),
         mission_feedback_timer_s: 5.0,
+        show_tutorial: settings.show_tutorial,
         staging_count: 0,
         stage_requested: false,
         throttle_override: None,
@@ -821,9 +833,19 @@ fn step_flight_controls_and_physics(
             }
             Err(err) => flight.status_banner = err,
         }
+        return;
+    }
+    for (key, slot) in [(KeyCode::F6, 1), (KeyCode::F7, 2), (KeyCode::F8, 3)] {
+        if keys.just_pressed(key) {
+            match save_quicksave_slot(slot, &flight.world, flight.maneuver) {
+                Ok(path) => flight.status_banner = format!("Saved slot {slot}: {}", path.display()),
+                Err(err) => flight.status_banner = err,
+            }
+            return;
+        }
     }
     if keys.just_pressed(KeyCode::F9) {
-        match load_quicksave() {
+        match load_quicksave_slot(1).or_else(|_| load_quicksave()) {
             Ok((loaded, plan)) => {
                 flight.world = loaded;
                 flight.maneuver = plan;
@@ -837,7 +859,28 @@ fn step_flight_controls_and_physics(
                 }
                 flight.needs_visual_rebuild = true;
                 flight.pred_tick = PREDICTION_REFRESH_FRAMES;
-                flight.status_banner = String::from("Loaded bit-exact quicksave.");
+                flight.status_banner = String::from("Loaded bit-exact save slot 1.");
+            }
+            Err(err) => flight.status_banner = err,
+        }
+        return;
+    }
+    if keys.just_pressed(KeyCode::F10) {
+        match load_quicksave_slot(2) {
+            Ok((loaded, plan)) => {
+                flight.world = loaded;
+                flight.maneuver = plan;
+                if let Some((ctrl, pos)) = flight.world.active_vessel().map(|v| (v.control, v.pos))
+                {
+                    flight.throttle = ctrl.throttle;
+                    flight.sas_enabled = ctrl.sas_enabled;
+                    flight.sas_mode = ctrl.sas_mode;
+                    flight.rcs_enabled = ctrl.rcs_enabled;
+                    origin.origin_m = pos;
+                }
+                flight.needs_visual_rebuild = true;
+                flight.pred_tick = PREDICTION_REFRESH_FRAMES;
+                flight.status_banner = String::from("Loaded bit-exact save slot 2.");
             }
             Err(err) => flight.status_banner = err,
         }

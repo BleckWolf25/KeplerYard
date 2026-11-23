@@ -12,7 +12,7 @@
 //! and maneuver plan sidecar state (`quicksave.kym`).
 //!
 //! @since 21/11/2026
-//! @updated 21/11/2026
+//! @updated 22/11/2026
 
 // ---------- IMPORTS
 
@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 const QUICKSAVE_FILE: &str = "quicksave.kyw";
 const QUICKSAVE_MANEUVER_FILE: &str = "quicksave.kym";
 const LEGACY_CRAFT_FILE: &str = "custom_craft.kyc";
+const SETTINGS_FILE: &str = "settings.ini";
 
 // ---------- TYPES
 
@@ -184,6 +185,82 @@ pub fn load_craft_from_path(path: &Path) -> Result<VesselBlueprint, String> {
 
 pub fn delete_saved_craft(path: &Path) -> Result<(), String> {
     fs::remove_file(path).map_err(|e| format!("failed to delete {}: {e}", path.display()))
+}
+
+pub fn save_quicksave_slot(
+    slot: u8,
+    world: &SimWorld,
+    plan: ManeuverPlan,
+) -> Result<PathBuf, String> {
+    if !(1..=3).contains(&slot) {
+        return Err(String::from("save slot must be between 1 and 3"));
+    }
+    let dir = save_directory()?;
+    let path = dir.join(format!("slot_{slot}.kyw"));
+    fs::write(&path, save_world_bytes(world))
+        .map_err(|e| format!("failed to write save slot {slot}: {e}"))?;
+    let mut plan_bytes = Vec::with_capacity(25);
+    plan_bytes.push(u8::from(plan.enabled));
+    plan_bytes.extend_from_slice(&plan.lead_time_s.to_bits().to_le_bytes());
+    plan_bytes.extend_from_slice(&plan.prograde_dv_m_s.to_bits().to_le_bytes());
+    plan_bytes.extend_from_slice(&plan.radial_dv_m_s.to_bits().to_le_bytes());
+    let _ = fs::write(dir.join(format!("slot_{slot}.kym")), plan_bytes);
+    Ok(path)
+}
+
+pub fn load_quicksave_slot(slot: u8) -> Result<(SimWorld, ManeuverPlan), String> {
+    if !(1..=3).contains(&slot) {
+        return Err(String::from("save slot must be between 1 and 3"));
+    }
+    let dir = save_directory()?;
+    let path = dir.join(format!("slot_{slot}.kyw"));
+    let world =
+        load_world_bytes(&fs::read(&path).map_err(|e| format!("no save in slot {slot}: {e}"))?)
+            .map_err(|e| format!("invalid save in slot {slot}: {e}"))?;
+    let plan = if let Ok(pb) = fs::read(dir.join(format!("slot_{slot}.kym")))
+        && pb.len() == 25
+        && let (Ok(a), Ok(b), Ok(c)) = (
+            pb[1..9].try_into(),
+            pb[9..17].try_into(),
+            pb[17..25].try_into(),
+        ) {
+        ManeuverPlan {
+            enabled: pb[0] != 0,
+            lead_time_s: f64::from_le_bytes(a),
+            prograde_dv_m_s: f64::from_le_bytes(b),
+            radial_dv_m_s: f64::from_le_bytes(c),
+        }
+    } else {
+        ManeuverPlan::default()
+    };
+    Ok((world, plan))
+}
+
+pub fn save_settings(borderless_fullscreen: bool, show_tutorial: bool) -> Result<(), String> {
+    let dir = save_directory()?;
+    let text =
+        format!("borderless_fullscreen={borderless_fullscreen}\nshow_tutorial={show_tutorial}\n");
+    fs::write(dir.join(SETTINGS_FILE), text).map_err(|e| format!("failed to write settings: {e}"))
+}
+
+pub fn load_settings() -> Result<(bool, bool), String> {
+    let dir = save_directory()?;
+    let text =
+        fs::read_to_string(dir.join(SETTINGS_FILE)).map_err(|e| format!("no settings: {e}"))?;
+    let mut fullscreen = false;
+    let mut tutorial = true;
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=')
+            && let Ok(enabled) = value.parse::<bool>()
+        {
+            match key {
+                "borderless_fullscreen" => fullscreen = enabled,
+                "show_tutorial" => tutorial = enabled,
+                _ => {}
+            }
+        }
+    }
+    Ok((fullscreen, tutorial))
 }
 
 // ---------- EXPORTS

@@ -28,6 +28,7 @@ mod editor;
 mod flight;
 mod flight_fx;
 mod flight_hud;
+mod main_menu;
 mod part_catalog;
 mod part_icons;
 mod procedural_mesh;
@@ -36,7 +37,11 @@ mod shaders;
 mod state;
 mod ui_kit;
 
-fn toggle_fullscreen(keys: Res<'_, ButtonInput<KeyCode>>, mut windows: Query<'_, '_, &mut Window>) {
+fn toggle_fullscreen(
+    keys: Res<'_, ButtonInput<KeyCode>>,
+    mut settings: ResMut<'_, state::AppSettings>,
+    mut windows: Query<'_, '_, &mut Window>,
+) {
     if keys.just_pressed(KeyCode::F11)
         && let Ok(mut window) = windows.single_mut()
     {
@@ -45,6 +50,11 @@ fn toggle_fullscreen(keys: Res<'_, ButtonInput<KeyCode>>, mut windows: Query<'_,
         } else {
             WindowMode::Windowed
         };
+        settings.borderless_fullscreen = matches!(
+            window.mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+        );
+        let _ = save_io::save_settings(settings.borderless_fullscreen, settings.show_tutorial);
     }
 }
 
@@ -70,6 +80,7 @@ fn main() {
         .add_plugins((
             state::StatePlugin,
             ui_kit::UiKitPlugin,
+            main_menu::MainMenuPlugin,
             part_catalog::PartCatalogPlugin,
             part_icons::PartIconsPlugin,
             shaders::KeplerShadersPlugin,

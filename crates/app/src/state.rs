@@ -34,8 +34,30 @@ pub const PHYSICAL_WARP_MAX_INDEX: usize = 2;
 #[derive(States, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GameMode {
     #[default]
+    Menu,
     Editor,
     Flight,
+}
+
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct AppSettings {
+    pub borderless_fullscreen: bool,
+    pub show_tutorial: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            borderless_fullscreen: false,
+            show_tutorial: true,
+        }
+    }
+}
+
+#[derive(Resource, Clone, Debug)]
+pub struct PendingFlightLoad {
+    pub world: kepler_core::SimWorld,
+    pub maneuver: kepler_core::ManeuverPlan,
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -286,6 +308,7 @@ impl Plugin for StatePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LivePartCatalog>()
             .init_resource::<ActiveBlueprint>()
+            .init_resource::<AppSettings>()
             .init_resource::<FloatingOrigin>()
             .init_resource::<FlightClock>()
             .init_resource::<ActiveLaunchSystem>()

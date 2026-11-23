@@ -202,7 +202,9 @@ fn update_tooltip(
         label.0.clone_from(&tip.0);
     }
 
-    let x = (cursor.x + 16.0).min(window.width() - TOOLTIP_WIDTH_PX - 8.0).max(4.0);
+    let x = (cursor.x + 16.0)
+        .min(window.width() - TOOLTIP_WIDTH_PX - 8.0)
+        .max(4.0);
     let y = if cursor.y > window.height() - 140.0 {
         cursor.y - 70.0
     } else {

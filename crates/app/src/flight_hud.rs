@@ -94,6 +94,7 @@ pub enum FlightUiAction {
     Resume,
     RevertToLaunchpad,
     ReturnToVab,
+    ReturnToMenu,
     RecoverVessel,
 }
 
@@ -394,7 +395,8 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                     "[Space] Stage  [G] Arm Chute  [Shift/Ctrl/Z/X] Throttle\n\
                      [A/D] Steer  [T] SAS  [B] SAS Mode  [R] RCS  [H/N/Q/E] RCS Trans\n\
                      [M] Plan TLI  [U/J] Pro dV  [O/L] Rad dV  [I/K] Lead  [V] Clear\n\
-                     [./,] Warp  [P] Pause  [[]/[]] Vessel  [Tab] Focus  [F5/F9] Save/Load\n\
+                     [./,] Warp  [P] Pause  [[]/[]] Vessel  [Tab] Focus\n\
+                     [F5] QuickSave  [F6/F7/F8] Slot 1/2/3 Save  [F9/F10] Slot 1/2 Load\n\
                      [Esc] Flight Menu",
                 ),
                 TextFont::from_font_size(10.5),
@@ -502,6 +504,12 @@ pub fn spawn_flight_hud_ui(commands: &mut Commands<'_, '_>) {
                         card,
                         "Return to VAB Editor",
                         FlightUiAction::ReturnToVab,
+                        false,
+                    );
+                    spawn_modal_btn(
+                        card,
+                        "Return to Main Menu",
+                        FlightUiAction::ReturnToMenu,
                         false,
                     );
                     spawn_modal_btn(
@@ -817,6 +825,9 @@ pub fn apply_flight_ui_action(
         }
         FlightUiAction::ReturnToVab => {
             next_mode.set(GameMode::Editor);
+        }
+        FlightUiAction::ReturnToMenu => {
+            next_mode.set(GameMode::Menu);
         }
         FlightUiAction::RecoverVessel => {
             flight.recovered_summary = true;
@@ -1245,6 +1256,16 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
     } else {
         " (RAILS)"
     };
+    let tutorial = if flight.show_tutorial {
+        "\nMISSION CHECKLIST\n\
+         [ ] Launch from the pad\n\
+         [ ] Reach a stable low orbit\n\
+         [ ] Plan a TLI transfer to Moon\n\
+         [ ] Enter lunar orbit\n\
+         [ ] Land and recover"
+    } else {
+        ""
+    };
 
     format!(
         "TELEMETRY - {} ({})\n\
@@ -1255,7 +1276,7 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
          Throttle: {:.0}%   Stage: {}/{}   Mass: {:.0} kg\n\
          Fuel: {:.0} kg ({:.0}%)\n\
          {}\n\
-         {}",
+         {}{}",
         v.name,
         body_name,
         status,
@@ -1278,6 +1299,7 @@ fn format_flight_hud(flight: &FlightSimState, clock: &FlightClock) -> String {
         fuel_pct,
         transfer_str,
         flight.status_banner,
+        tutorial,
     )
 }
 

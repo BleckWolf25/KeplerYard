@@ -144,7 +144,7 @@ fn update_camera_zoom_and_pan(
     }
 
     let (min_log, max_log) = match input.mode.get() {
-        GameMode::Editor => (EDITOR_MIN_LOG_SCALE, EDITOR_MAX_LOG_SCALE),
+        GameMode::Menu | GameMode::Editor => (EDITOR_MIN_LOG_SCALE, EDITOR_MAX_LOG_SCALE),
         GameMode::Flight => (FLIGHT_MIN_LOG_SCALE, FLIGHT_MAX_LOG_SCALE),
     };
     zoom.log_scale = zoom.log_scale.clamp(min_log, max_log);
@@ -163,7 +163,7 @@ fn update_camera_zoom_and_pan(
         );
         let shift = offset_px * (old_scale - ortho_scale);
         match input.mode.get() {
-            GameMode::Editor => {
+            GameMode::Menu | GameMode::Editor => {
                 zoom.editor_pan += shift;
                 zoom.editor_pan = zoom.editor_pan.clamp(Vec2::splat(-60.0), Vec2::splat(60.0));
             }
@@ -193,7 +193,7 @@ fn update_camera_zoom_and_pan(
     }
 
     match input.mode.get() {
-        GameMode::Editor => {
+        GameMode::Menu | GameMode::Editor => {
             zoom.editor_pan.x -= drag.x * ortho_scale;
             zoom.editor_pan.y += drag.y * ortho_scale;
             zoom.editor_pan = zoom.editor_pan.clamp(Vec2::splat(-60.0), Vec2::splat(60.0));
@@ -221,7 +221,7 @@ fn update_camera_zoom_and_pan(
             ortho.scale = ortho_scale;
         }
         match input.mode.get() {
-            GameMode::Editor => {
+            GameMode::Menu | GameMode::Editor => {
                 transform.translation.x = zoom.editor_pan.x;
                 transform.translation.y = zoom.editor_pan.y;
             }
